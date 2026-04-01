@@ -393,6 +393,16 @@ export function useTelnyxClient() {
       if (!clientRef.current || connectionStatus !== "connected") return;
       if (agentStatus === "dnd") return;
 
+      // Unlock audio element with user gesture (required on production domains)
+      if (audioRef.current) {
+        audioRef.current.srcObject = null;
+        audioRef.current.play().catch(() => {});
+      }
+      // Also ensure AudioContext is resumed for ringtones
+      if (audioCtxRef.current?.state === "suspended") {
+        audioCtxRef.current.resume();
+      }
+
       const call = clientRef.current.newCall({
         destinationNumber: number,
         callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
@@ -418,6 +428,11 @@ export function useTelnyxClient() {
   const answerCall = useCallback(() => {
     if (!inboundCall) return;
     stopRingtone();
+    // Unlock audio element with user gesture
+    if (audioRef.current) {
+      audioRef.current.srcObject = null;
+      audioRef.current.play().catch(() => {});
+    }
     inboundCall.answer({ video: false });
   }, [inboundCall, stopRingtone]);
 
