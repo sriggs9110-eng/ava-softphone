@@ -58,7 +58,7 @@ export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProp
   }, []);
 
   return (
-    <div className="flex flex-col items-center gap-4 w-full max-w-xs mx-auto">
+    <div className="flex flex-col items-center gap-5 w-full max-w-[380px] mx-auto animate-fade-in">
       {/* Number Input */}
       <div className="relative w-full">
         <input
@@ -67,17 +67,17 @@ export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProp
           onChange={(e) => setNumber(e.target.value)}
           onFocus={() => setShowRecents(true)}
           onBlur={() => setTimeout(() => setShowRecents(false), 200)}
-          className="w-full text-center text-2xl font-light bg-card border border-border rounded-xl px-4 py-3 text-foreground focus:outline-none focus:border-coral transition-colors"
+          className="w-full text-center text-[28px] font-semibold tracking-[1px] bg-bg-elevated border border-border-subtle rounded-xl px-4 py-4 text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition-all"
           placeholder="+1"
         />
         {number.length > 2 && (
-          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-1">
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 flex gap-1">
             <button
               onClick={handleBackspace}
-              className="p-1.5 text-muted hover:text-foreground transition-colors"
+              className="p-2 text-text-tertiary hover:text-text-primary transition-colors rounded-lg hover:bg-bg-hover"
               aria-label="Backspace"
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 4H8l-7 8 7 8h13a2 2 0 002-2V6a2 2 0 00-2-2z" />
                 <line x1="18" y1="9" x2="12" y2="15" />
                 <line x1="12" y1="9" x2="18" y2="15" />
@@ -85,7 +85,7 @@ export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProp
             </button>
             <button
               onClick={handleClear}
-              className="p-1.5 text-muted hover:text-foreground transition-colors text-xs"
+              className="p-2 text-text-tertiary hover:text-text-primary transition-colors rounded-lg hover:bg-bg-hover text-[10px] font-semibold uppercase tracking-wider"
               aria-label="Clear"
             >
               CLR
@@ -95,12 +95,12 @@ export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProp
 
         {/* Recent Numbers Dropdown */}
         {showRecents && recentNumbers.length > 0 && (
-          <div className="absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded-xl overflow-hidden z-10 shadow-lg">
+          <div className="absolute top-full left-0 right-0 mt-2 bg-bg-surface border border-border-subtle rounded-xl overflow-hidden z-10 shadow-2xl animate-fade-in">
             {recentNumbers.slice(0, 5).map((num, i) => (
               <button
                 key={i}
                 onMouseDown={() => handleRecentSelect(num)}
-                className="w-full text-left px-4 py-2.5 text-sm text-foreground hover:bg-card-hover transition-colors"
+                className="w-full text-left px-4 py-3 text-sm text-text-primary hover:bg-bg-hover transition-colors border-b border-border-subtle last:border-b-0"
               >
                 {num}
               </button>
@@ -110,16 +110,18 @@ export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProp
       </div>
 
       {/* Number Pad */}
-      <div className="grid grid-cols-3 gap-3 w-full">
+      <div className="grid grid-cols-3 gap-4 w-full px-4">
         {KEYS.flat().map((key) => (
           <button
             key={key}
             onClick={() => handleKey(key)}
-            className="flex flex-col items-center justify-center h-16 rounded-xl bg-card hover:bg-card-hover active:bg-border transition-colors select-none"
+            className="flex flex-col items-center justify-center w-14 h-14 mx-auto rounded-full bg-bg-elevated hover:bg-bg-hover active:scale-95 transition-all duration-150 select-none"
           >
-            <span className="text-xl font-medium text-foreground">{key}</span>
+            <span className="text-[32px] font-semibold text-text-primary leading-none">
+              {key}
+            </span>
             {SUB_LABELS[key] && (
-              <span className="text-[10px] tracking-widest text-muted mt-0.5">
+              <span className="text-[9px] tracking-[2px] text-text-tertiary uppercase mt-0.5">
                 {SUB_LABELS[key]}
               </span>
             )}
@@ -131,7 +133,7 @@ export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProp
       <button
         onClick={handleCall}
         disabled={number.length <= 2 || disabled}
-        className="w-16 h-16 rounded-full bg-green hover:bg-green/90 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition-all active:scale-95 mt-2"
+        className="w-16 h-16 rounded-full bg-accent hover:bg-accent-hover disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all duration-150 active:scale-95 mt-2 hover:shadow-[0_0_20px_rgba(232,80,42,0.4)]"
         aria-label="Call"
       >
         <svg width="28" height="28" viewBox="0 0 24 24" fill="white">

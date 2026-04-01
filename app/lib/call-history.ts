@@ -21,6 +21,19 @@ export function addCallHistoryEntry(entry: CallHistoryEntry): CallHistoryEntry[]
   return trimmed;
 }
 
+export function updateCallHistoryEntry(
+  id: string,
+  updates: Partial<CallHistoryEntry>
+): CallHistoryEntry[] {
+  const history = getCallHistory();
+  const idx = history.findIndex((e) => e.id === id);
+  if (idx !== -1) {
+    history[idx] = { ...history[idx], ...updates };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+  }
+  return history;
+}
+
 export function clearCallHistory(): void {
   localStorage.removeItem(STORAGE_KEY);
 }

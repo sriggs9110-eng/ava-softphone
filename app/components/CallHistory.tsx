@@ -10,41 +10,45 @@ interface CallHistoryProps {
 export default function CallHistory({ entries, onDial }: CallHistoryProps) {
   if (entries.length === 0) {
     return (
-      <div className="text-center py-8 text-muted text-sm">
-        No call history yet
+      <div className="flex flex-col items-center justify-center py-16 text-text-tertiary">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="mb-3 opacity-40">
+          <circle cx="12" cy="12" r="10" />
+          <polyline points="12 6 12 12 16 14" />
+        </svg>
+        <p className="text-sm">No call history yet</p>
       </div>
     );
   }
 
   return (
-    <div className="w-full max-w-md mx-auto">
-      <h2 className="text-sm font-medium text-muted uppercase tracking-wide px-4 mb-3">
+    <div className="w-full animate-fade-in">
+      <h2 className="text-[12px] font-medium text-text-tertiary uppercase tracking-[0.5px] px-1 mb-3">
         Recent Calls
       </h2>
-      <div className="space-y-1">
+      <div className="space-y-0.5">
         {entries.map((entry) => (
           <button
             key={entry.id}
             onClick={() => onDial(entry.number)}
-            className="w-full flex items-center gap-3 px-4 py-3 hover:bg-card rounded-xl transition-colors group"
+            className="w-full flex items-center gap-3 px-3 py-3 hover:bg-bg-elevated rounded-lg transition-all duration-150 group"
           >
             {/* Direction icon */}
             <div
-              className={`flex-shrink-0 ${
+              className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
                 entry.status === "missed" || entry.status === "rejected"
-                  ? "text-red"
+                  ? "bg-red/10 text-red"
                   : entry.direction === "inbound"
-                  ? "text-green"
-                  : "text-coral"
+                  ? "bg-green/10 text-green"
+                  : "bg-accent/10 text-accent"
               }`}
             >
               {entry.direction === "inbound" ? (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="7 17 17 7" />
                   <polyline points="7 7 7 17 17 17" />
                 </svg>
               ) : (
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="17 7 7 17" />
                   <polyline points="17 17 17 7 7 7" />
                 </svg>
@@ -52,22 +56,30 @@ export default function CallHistory({ entries, onDial }: CallHistoryProps) {
             </div>
 
             {/* Number and time */}
-            <div className="flex-1 text-left">
-              <p className="text-sm text-foreground group-hover:text-coral transition-colors">
+            <div className="flex-1 text-left min-w-0">
+              <p className="text-[14px] font-medium text-text-primary group-hover:text-accent transition-colors truncate">
                 {entry.number}
               </p>
-              <p className="text-xs text-muted">
+              <p className="text-[12px] text-text-tertiary mt-0.5">
                 {formatTimestamp(entry.timestamp)}
               </p>
             </div>
 
-            {/* Duration */}
-            <div className="text-xs text-muted">
-              {entry.status === "missed"
-                ? "Missed"
-                : entry.status === "rejected"
-                ? "Declined"
-                : formatCallDuration(entry.duration)}
+            {/* Duration / Status */}
+            <div className="text-right shrink-0">
+              {entry.status === "missed" ? (
+                <span className="text-[11px] font-medium text-red uppercase tracking-wider">
+                  Missed
+                </span>
+              ) : entry.status === "rejected" ? (
+                <span className="text-[11px] font-medium text-red uppercase tracking-wider">
+                  Declined
+                </span>
+              ) : (
+                <span className="text-[12px] text-text-tertiary tabular-nums">
+                  {formatCallDuration(entry.duration)}
+                </span>
+              )}
             </div>
           </button>
         ))}

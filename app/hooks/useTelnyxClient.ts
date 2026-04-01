@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { TelnyxRTC, Call, INotification } from "@telnyx/webrtc";
 import {
   ActiveCallInfo,
+  AgentStatus,
   CallHistoryEntry,
-  CallStatus,
   ConnectionStatus,
 } from "@/app/lib/types";
 import { addCallHistoryEntry, getCallHistory } from "@/app/lib/call-history";
+
+const ACW_DURATION = 30; // seconds
 
 export function useTelnyxClient() {
   const clientRef = useRef<TelnyxRTC | null>(null);
@@ -22,12 +24,30 @@ export function useTelnyxClient() {
   const [callHistory, setCallHistory] = useState<CallHistoryEntry[]>([]);
   const [micError, setMicError] = useState<string | null>(null);
   const [transferCall, setTransferCall] = useState<ActiveCallInfo | null>(null);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>("available");
+  const [acwCountdown, setAcwCountdown] = useState<number | null>(null);
+  const acwTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const ringtoneRef = useRef<HTMLAudioElement | null>(null);
+  const ringtoneTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load call history on mount
   useEffect(() => {
     setCallHistory(getCallHistory());
+  }, []);
+
+  const startAcw = useCallback(() => {
+    setAgentStatus("after-call-work");
+    setAcwCountdown(ACW_DURATION);
+    acwTimerRef.current = setInterval(() => {
+      setAcwCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          if (acwTimerRef.current) clearInterval(acwTimerRef.current);
+          setAgentStatus("available");
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
   }, []);
 
   const addToHistory = useCallback(
@@ -35,7 +55,7 @@ export function useTelnyxClient() {
       number: string,
       direction: "inbound" | "outbound",
       duration: number,
-      status: "completed" | "missed" | "rejected"
+      status: "completed" | "missed" | "rejected" | "voicemail" | "no-answer"
     ) => {
       const entry: CallHistoryEntry = {
         id: crypto.randomUUID(),
@@ -56,6 +76,10 @@ export function useTelnyxClient() {
       ringtoneRef.current.pause();
       ringtoneRef.current.currentTime = 0;
     }
+    if (ringtoneTimeoutRef.current) {
+      clearTimeout(ringtoneTimeoutRef.current);
+      ringtoneTimeoutRef.current = null;
+    }
   }, []);
 
   const playRingtone = useCallback(() => {
@@ -64,7 +88,17 @@ export function useTelnyxClient() {
       ringtoneRef.current.loop = true;
     }
     ringtoneRef.current.play().catch(() => {});
-  }, []);
+    // Auto-dismiss after 30s
+    ringtoneTimeoutRef.current = setTimeout(() => {
+      stopRingtone();
+      if (inboundCall) {
+        const number = inboundCall.options.callerNumber || "Unknown";
+        inboundCall.hangup();
+        setInboundCall(null);
+        addToHistory(number, "inbound", 0, "missed");
+      }
+    }, 30000);
+  }, [stopRingtone, inboundCall, addToHistory]);
 
   const connect = useCallback(async () => {
     if (clientRef.current) return;
@@ -97,17 +131,23 @@ export function useTelnyxClient() {
         const call = notification.call;
         if (!call) return;
 
+        console.log("[Telnyx]", notification.type, call.state, call.direction, call.cause);
+
         switch (notification.type) {
           case "callUpdate": {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
+              // Reject if DND
+              if (agentStatus === "dnd") {
+                call.hangup();
+                return;
+              }
               setInboundCall(call);
               playRingtone();
-              if (Notification.permission === "granted") {
+              if (typeof Notification !== "undefined" && Notification.permission === "granted") {
                 new Notification("Incoming Call", {
                   body: `Call from ${call.options.callerNumber || "Unknown"}`,
-                  icon: "/phone-icon.png",
                 });
               }
               return;
@@ -115,7 +155,6 @@ export function useTelnyxClient() {
 
             if (state === "active") {
               stopRingtone();
-              // Check if this is the transfer leg
               if (transferCallRef.current && call.id === transferCallRef.current.id) {
                 setTransferCall({
                   number: call.options.destinationNumber || "",
@@ -131,8 +170,8 @@ export function useTelnyxClient() {
               setInboundCall(null);
               callRef.current = call;
               callStartRef.current = Date.now();
+              setAgentStatus("on-call");
 
-              // Attach remote audio
               if (call.remoteStream && audioRef.current) {
                 audioRef.current.srcObject = call.remoteStream;
                 audioRef.current.play().catch(() => {});
@@ -164,7 +203,6 @@ export function useTelnyxClient() {
             }
 
             if (state === "trying" || state === "requesting") {
-              // Outbound call initiated
               if (transferCallRef.current && call.id === transferCallRef.current.id) {
                 setTransferCall({
                   number: call.options.destinationNumber || "",
@@ -180,11 +218,9 @@ export function useTelnyxClient() {
             if (state === "hangup" || state === "destroy") {
               stopRingtone();
 
-              // Transfer leg hung up
               if (transferCallRef.current && call.id === transferCallRef.current.id) {
                 transferCallRef.current = null;
                 setTransferCall(null);
-                // Unhold the original call
                 if (callRef.current) {
                   callRef.current.unhold().catch(() => {});
                   setActiveCall((prev) =>
@@ -194,7 +230,6 @@ export function useTelnyxClient() {
                 return;
               }
 
-              // Main call hung up
               const duration = callStartRef.current
                 ? Math.floor((Date.now() - callStartRef.current) / 1000)
                 : 0;
@@ -218,12 +253,14 @@ export function useTelnyxClient() {
                 audioRef.current.srcObject = null;
               }
 
-              // Also hang up transfer if active
               if (transferCallRef.current) {
                 transferCallRef.current.hangup();
                 transferCallRef.current = null;
                 setTransferCall(null);
               }
+
+              // Start ACW timer
+              startAcw();
             }
             break;
           }
@@ -239,18 +276,18 @@ export function useTelnyxClient() {
       client.connect();
       clientRef.current = client;
 
-      // Request notification permission
       if (typeof Notification !== "undefined" && Notification.permission === "default") {
         Notification.requestPermission();
       }
     } catch {
       setConnectionStatus("disconnected");
     }
-  }, [addToHistory, playRingtone, stopRingtone]);
+  }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw]);
 
   const makeCall = useCallback(
     (number: string) => {
       if (!clientRef.current || connectionStatus !== "connected") return;
+      if (agentStatus === "dnd") return;
 
       const call = clientRef.current.newCall({
         destinationNumber: number,
@@ -260,6 +297,7 @@ export function useTelnyxClient() {
       });
 
       callRef.current = call;
+      setAgentStatus("on-call");
       setActiveCall({
         number,
         direction: "outbound",
@@ -269,7 +307,7 @@ export function useTelnyxClient() {
         isHeld: false,
       });
     },
-    [connectionStatus]
+    [connectionStatus, agentStatus]
   );
 
   const answerCall = useCallback(() => {
@@ -288,12 +326,8 @@ export function useTelnyxClient() {
   }, [inboundCall, addToHistory, stopRingtone]);
 
   const hangup = useCallback(() => {
-    if (callRef.current) {
-      callRef.current.hangup();
-    }
-    if (transferCallRef.current) {
-      transferCallRef.current.hangup();
-    }
+    if (callRef.current) callRef.current.hangup();
+    if (transferCallRef.current) transferCallRef.current.hangup();
   }, []);
 
   const toggleMute = useCallback(() => {
@@ -314,11 +348,7 @@ export function useTelnyxClient() {
     setActiveCall((prev) => {
       if (!prev) return null;
       const newHeld = !prev.isHeld;
-      return {
-        ...prev,
-        isHeld: newHeld,
-        status: newHeld ? "held" : "active",
-      };
+      return { ...prev, isHeld: newHeld, status: newHeld ? "held" : "active" };
     });
   }, []);
 
@@ -327,44 +357,33 @@ export function useTelnyxClient() {
     callRef.current.dtmf(digit);
   }, []);
 
-  const initiateTransfer = useCallback(
-    (targetNumber: string) => {
-      if (!clientRef.current || !callRef.current) return;
-
-      // Hold the original call
-      callRef.current.hold();
-      setActiveCall((prev) =>
-        prev ? { ...prev, isHeld: true, status: "held" } : null
-      );
-
-      // Dial the transfer target
-      const tCall = clientRef.current.newCall({
-        destinationNumber: targetNumber,
-        callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
-        audio: true,
-        video: false,
-      });
-
-      transferCallRef.current = tCall;
-      setTransferCall({
-        number: targetNumber,
-        direction: "outbound",
-        status: "dialing",
-        startTime: null,
-        isMuted: false,
-        isHeld: false,
-      });
-    },
-    []
-  );
+  const initiateTransfer = useCallback((targetNumber: string) => {
+    if (!clientRef.current || !callRef.current) return;
+    callRef.current.hold();
+    setActiveCall((prev) =>
+      prev ? { ...prev, isHeld: true, status: "held" } : null
+    );
+    const tCall = clientRef.current.newCall({
+      destinationNumber: targetNumber,
+      callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
+      audio: true,
+      video: false,
+    });
+    transferCallRef.current = tCall;
+    setTransferCall({
+      number: targetNumber,
+      direction: "outbound",
+      status: "dialing",
+      startTime: null,
+      isMuted: false,
+      isHeld: false,
+    });
+  }, []);
 
   const completeTransfer = useCallback(() => {
-    // In a warm transfer, we complete by hanging up our legs
-    // and using the API to bridge the two calls
     if (callRef.current && transferCallRef.current) {
       const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
       const transferCallId = transferCallRef.current.telnyxIDs.telnyxCallControlId;
-
       fetch("/api/telnyx/transfer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -373,8 +392,6 @@ export function useTelnyxClient() {
           transfer_to_call_control_id: transferCallId,
         }),
       }).catch(() => {});
-
-      // Hang up our end
       transferCallRef.current.hangup();
       callRef.current.hangup();
       transferCallRef.current = null;
@@ -390,7 +407,6 @@ export function useTelnyxClient() {
       transferCallRef.current = null;
       setTransferCall(null);
     }
-    // Unhold original
     if (callRef.current) {
       callRef.current.unhold();
       setActiveCall((prev) =>
@@ -401,10 +417,8 @@ export function useTelnyxClient() {
 
   const mergeConference = useCallback(() => {
     if (!callRef.current || !transferCallRef.current) return;
-
     const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
     const transferCallId = transferCallRef.current.telnyxIDs.telnyxCallControlId;
-
     fetch("/api/telnyx/conference", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -412,8 +426,6 @@ export function useTelnyxClient() {
         call_control_ids: [originalCallId, transferCallId],
       }),
     }).catch(() => {});
-
-    // Unhold both
     callRef.current.unhold().catch(() => {});
     setActiveCall((prev) =>
       prev ? { ...prev, isHeld: false, status: "active" } : null
@@ -422,7 +434,27 @@ export function useTelnyxClient() {
     transferCallRef.current = null;
   }, []);
 
-  // Connect on mount
+  const voicemailDrop = useCallback(() => {
+    if (!callRef.current) return;
+    const callControlId = callRef.current.telnyxIDs.telnyxCallControlId;
+    fetch("/api/telnyx/voicemail-drop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ call_control_id: callControlId }),
+    }).catch(() => {});
+    // Hang up our end immediately
+    callRef.current.hangup();
+  }, []);
+
+  const changeAgentStatus = useCallback((status: AgentStatus) => {
+    if (acwTimerRef.current) {
+      clearInterval(acwTimerRef.current);
+      acwTimerRef.current = null;
+    }
+    setAcwCountdown(null);
+    setAgentStatus(status);
+  }, []);
+
   useEffect(() => {
     connect();
     return () => {
@@ -430,6 +462,7 @@ export function useTelnyxClient() {
         clientRef.current.disconnect();
         clientRef.current = null;
       }
+      if (acwTimerRef.current) clearInterval(acwTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -441,6 +474,8 @@ export function useTelnyxClient() {
     callHistory,
     micError,
     transferCall,
+    agentStatus,
+    acwCountdown,
     audioRef,
     makeCall,
     answerCall,
@@ -453,6 +488,8 @@ export function useTelnyxClient() {
     completeTransfer,
     cancelTransfer,
     mergeConference,
+    voicemailDrop,
+    changeAgentStatus,
     setCallHistory,
   };
 }

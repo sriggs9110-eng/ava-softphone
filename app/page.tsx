@@ -2,13 +2,26 @@
 
 import { useState, useMemo, useCallback } from "react";
 import { useTelnyxClient } from "@/app/hooks/useTelnyxClient";
-import StatusBar from "@/app/components/StatusBar";
+import Sidebar, { NavPage } from "@/app/components/Sidebar";
 import DialPad from "@/app/components/DialPad";
 import ActiveCallUI from "@/app/components/ActiveCallUI";
 import InboundCallUI from "@/app/components/InboundCallUI";
 import TransferUI from "@/app/components/TransferUI";
 import CallHistory from "@/app/components/CallHistory";
+import CallHistoryPage from "@/app/components/CallHistoryPage";
+import MonitorPage from "@/app/components/MonitorPage";
+import ReportsPage from "@/app/components/ReportsPage";
+import TranscriptsPage from "@/app/components/TranscriptsPage";
 import MicError from "@/app/components/MicError";
+
+const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
+  phone: { title: "Phone", subtitle: "Make or receive calls" },
+  history: { title: "Call History", subtitle: "Review past calls & AI analysis" },
+  monitor: { title: "Live Monitoring", subtitle: "Manager view" },
+  reports: { title: "Reports", subtitle: "Call analytics & metrics" },
+  transcripts: { title: "Transcripts", subtitle: "Search call transcripts" },
+  settings: { title: "Settings", subtitle: "Configuration" },
+};
 
 export default function Home() {
   const {
@@ -18,6 +31,8 @@ export default function Home() {
     callHistory,
     micError,
     transferCall,
+    agentStatus,
+    acwCountdown,
     audioRef,
     makeCall,
     answerCall,
@@ -30,47 +45,62 @@ export default function Home() {
     completeTransfer,
     cancelTransfer,
     mergeConference,
+    voicemailDrop,
+    changeAgentStatus,
+    setCallHistory,
   } = useTelnyxClient();
 
+  const [activePage, setActivePage] = useState<NavPage>("phone");
   const [showTransfer, setShowTransfer] = useState(false);
+  const [showVmConfirm, setShowVmConfirm] = useState(false);
 
   const recentNumbers = useMemo(
     () => [...new Set(callHistory.map((e) => e.number))],
     [callHistory]
   );
 
-  const handleTransferClick = useCallback(() => {
-    setShowTransfer(true);
-  }, []);
-
+  const handleTransferClick = useCallback(() => setShowTransfer(true), []);
   const handleTransferDial = useCallback(
-    (number: string) => {
-      initiateTransfer(number);
-    },
+    (number: string) => initiateTransfer(number),
     [initiateTransfer]
   );
-
   const handleTransferComplete = useCallback(() => {
     completeTransfer();
     setShowTransfer(false);
   }, [completeTransfer]);
-
   const handleTransferCancel = useCallback(() => {
     cancelTransfer();
     setShowTransfer(false);
   }, [cancelTransfer]);
-
   const handleConference = useCallback(() => {
     mergeConference();
     setShowTransfer(false);
   }, [mergeConference]);
 
+  const handleVmDrop = useCallback(() => setShowVmConfirm(true), []);
+  const confirmVmDrop = useCallback(() => {
+    voicemailDrop();
+    setShowVmConfirm(false);
+  }, [voicemailDrop]);
+
+  // Override page title when on active call
+  const pageInfo =
+    activePage === "phone" && activeCall
+      ? { title: "Active Call", subtitle: "In progress" }
+      : PAGE_TITLES[activePage];
+
   return (
-    <div className="flex flex-col flex-1 min-h-screen bg-background">
-      {/* Hidden audio element for remote stream */}
+    <div className="flex w-full min-h-screen bg-bg-app">
       <audio ref={audioRef} autoPlay playsInline />
 
-      <StatusBar status={connectionStatus} />
+      <Sidebar
+        activePage={activePage}
+        onNavigate={setActivePage}
+        connectionStatus={connectionStatus}
+        agentStatus={agentStatus}
+        onAgentStatusChange={changeAgentStatus}
+        acwCountdown={acwCountdown}
+      />
 
       {/* Inbound call overlay */}
       {inboundCall && !activeCall && (
@@ -93,34 +123,173 @@ export default function Home() {
         />
       )}
 
+      {/* VM Drop confirm */}
+      {showVmConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-app/80 backdrop-blur-sm">
+          <div className="bg-bg-surface border border-border-subtle rounded-xl p-6 max-w-sm w-full mx-4 animate-slide-up">
+            <h3 className="text-base font-semibold text-text-primary mb-2">
+              Drop Voicemail?
+            </h3>
+            <p className="text-[13px] text-text-secondary mb-5">
+              This will play a pre-recorded message and disconnect you
+              immediately.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowVmConfirm(false)}
+                className="flex-1 py-2.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-semibold transition-all min-h-[44px]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmVmDrop}
+                className="flex-1 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all min-h-[44px]"
+              >
+                Drop & Disconnect
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
-      <main className="flex-1 flex flex-col items-center pt-8 pb-4 px-4">
-        {activeCall ? (
-          <ActiveCallUI
-            call={activeCall}
-            onHangup={hangup}
-            onToggleMute={toggleMute}
-            onToggleHold={toggleHold}
-            onDTMF={sendDTMF}
-            onTransfer={handleTransferClick}
-          />
-        ) : (
-          <>
-            <div className="mb-8">
-              <DialPad
-                onCall={makeCall}
-                recentNumbers={recentNumbers}
-                disabled={connectionStatus !== "connected"}
-              />
+      <main className="flex-1 flex flex-col overflow-y-auto">
+        <div className="w-full max-w-[1200px] mx-auto px-6 py-8">
+          {/* Page Header */}
+          <div className="mb-8">
+            <h1 className="text-xl font-semibold text-text-primary">
+              {pageInfo.title}
+            </h1>
+            <p className="text-[12px] text-text-tertiary mt-1 uppercase tracking-[0.5px] font-medium">
+              {pageInfo.subtitle}
+            </p>
+          </div>
+
+          {/* Phone Page */}
+          {activePage === "phone" && (
+            <>
+              {activeCall ? (
+                <ActiveCallUI
+                  call={activeCall}
+                  onHangup={hangup}
+                  onToggleMute={toggleMute}
+                  onToggleHold={toggleHold}
+                  onDTMF={sendDTMF}
+                  onTransfer={handleTransferClick}
+                  onVoicemailDrop={handleVmDrop}
+                />
+              ) : (
+                <div className="flex flex-col items-center gap-8">
+                  <DialPad
+                    onCall={makeCall}
+                    recentNumbers={recentNumbers}
+                    disabled={connectionStatus !== "connected" || agentStatus === "dnd"}
+                  />
+                  {callHistory.length > 0 && (
+                    <div className="w-full max-w-md border-t border-border-subtle pt-6">
+                      <CallHistory
+                        entries={callHistory.slice(0, 5)}
+                        onDial={makeCall}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* History Page */}
+          {activePage === "history" && (
+            <CallHistoryPage
+              entries={callHistory}
+              onDial={(num) => {
+                setActivePage("phone");
+                makeCall(num);
+              }}
+              onUpdate={setCallHistory}
+            />
+          )}
+
+          {/* Monitor Page */}
+          {activePage === "monitor" && <MonitorPage />}
+
+          {/* Reports Page */}
+          {activePage === "reports" && <ReportsPage entries={callHistory} />}
+
+          {/* Transcripts Page */}
+          {activePage === "transcripts" && (
+            <TranscriptsPage entries={callHistory} />
+          )}
+
+          {/* Settings Page */}
+          {activePage === "settings" && (
+            <div className="max-w-lg space-y-4">
+              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-text-primary mb-1">
+                  Connection
+                </h3>
+                <div className="flex items-center gap-2 mt-2">
+                  <div
+                    className={`w-2 h-2 rounded-full ${
+                      connectionStatus === "connected"
+                        ? "bg-green"
+                        : connectionStatus === "connecting"
+                        ? "bg-amber"
+                        : "bg-red"
+                    }`}
+                  />
+                  <p className="text-[14px] text-text-secondary capitalize">
+                    {connectionStatus}
+                  </p>
+                </div>
+              </div>
+              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-text-primary mb-1">
+                  Outbound Number
+                </h3>
+                <p className="text-[14px] text-text-secondary tabular-nums mt-1">
+                  {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not configured"}
+                </p>
+              </div>
+              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-text-primary mb-1">
+                  Agent Status
+                </h3>
+                <div className="flex items-center gap-2 mt-2">
+                  <div
+                    className={`w-2 h-2 rounded-full ${
+                      agentStatus === "available"
+                        ? "bg-green"
+                        : agentStatus === "on-call"
+                        ? "bg-amber"
+                        : agentStatus === "dnd"
+                        ? "bg-red"
+                        : "bg-text-tertiary"
+                    }`}
+                  />
+                  <p className="text-[14px] text-text-secondary capitalize">
+                    {agentStatus.replace(/-/g, " ")}
+                  </p>
+                  {acwCountdown !== null && (
+                    <span className="text-[12px] text-amber ml-2">
+                      ({acwCountdown}s)
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-text-primary mb-1">
+                  Version
+                </h3>
+                <p className="text-[12px] text-text-tertiary mt-1">
+                  Ava Softphone v0.2.0
+                </p>
+              </div>
             </div>
-            <div className="w-full border-t border-border pt-4">
-              <CallHistory entries={callHistory} onDial={makeCall} />
-            </div>
-          </>
-        )}
+          )}
+        </div>
       </main>
 
-      {/* Mic error toast */}
       {micError && <MicError message={micError} />}
     </div>
   );

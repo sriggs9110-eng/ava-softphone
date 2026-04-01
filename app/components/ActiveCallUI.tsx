@@ -1,6 +1,16 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import {
+  Mic,
+  MicOff,
+  Pause,
+  Play,
+  Grid3X3,
+  ArrowRightLeft,
+  Voicemail,
+  UserPlus,
+} from "lucide-react";
 import { ActiveCallInfo } from "@/app/lib/types";
 
 interface ActiveCallUIProps {
@@ -10,6 +20,7 @@ interface ActiveCallUIProps {
   onToggleHold: () => void;
   onDTMF: (digit: string) => void;
   onTransfer: () => void;
+  onVoicemailDrop: () => void;
 }
 
 const DTMF_KEYS = [
@@ -26,6 +37,7 @@ export default function ActiveCallUI({
   onToggleHold,
   onDTMF,
   onTransfer,
+  onVoicemailDrop,
 }: ActiveCallUIProps) {
   const [elapsed, setElapsed] = useState(0);
   const [showKeypad, setShowKeypad] = useState(false);
@@ -42,9 +54,7 @@ export default function ActiveCallUI({
   }, [call.status, call.startTime]);
 
   const formatDuration = useCallback((secs: number) => {
-    const m = Math.floor(secs / 60)
-      .toString()
-      .padStart(2, "0");
+    const m = Math.floor(secs / 60).toString().padStart(2, "0");
     const s = (secs % 60).toString().padStart(2, "0");
     return `${m}:${s}`;
   }, []);
@@ -61,36 +71,59 @@ export default function ActiveCallUI({
       : call.status;
 
   return (
-    <div className="flex flex-col items-center gap-6 w-full max-w-xs mx-auto py-8">
-      {/* Connected indicator */}
+    <div className="flex flex-col items-center gap-8 w-full max-w-[380px] mx-auto py-8 animate-slide-up">
+      {/* Status indicator */}
       {call.status === "active" && (
-        <div className="relative">
-          <div className="w-3 h-3 rounded-full bg-green" />
-          <div className="absolute inset-0 w-3 h-3 rounded-full bg-green animate-pulse-ring" />
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <div className="w-2.5 h-2.5 rounded-full bg-green" />
+            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green animate-pulse-ring" />
+          </div>
+          <span className="text-[11px] font-medium uppercase tracking-wider text-green">
+            Connected
+          </span>
         </div>
       )}
 
-      {/* Number display */}
+      {call.status === "held" && (
+        <div className="px-3 py-1 rounded-full bg-amber/15 border border-amber/30">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-amber">
+            On Hold
+          </span>
+        </div>
+      )}
+
+      {(call.status === "dialing" || call.status === "ringing") && (
+        <div className="px-3 py-1 rounded-full bg-accent/15 border border-accent/30">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-accent">
+            {call.status === "dialing" ? "Dialing" : "Ringing"}
+          </span>
+        </div>
+      )}
+
+      {/* Number */}
       <div className="text-center">
-        <p className="text-2xl font-light text-foreground">{call.number}</p>
-        <p className="text-sm text-muted mt-1 uppercase tracking-wide">
-          {call.direction === "inbound" ? "Incoming" : "Outgoing"}
+        <p className="text-[28px] font-semibold text-text-primary tracking-[1px]">
+          {call.number}
+        </p>
+        <p className="text-[12px] text-text-tertiary mt-1 uppercase tracking-[0.5px] font-medium">
+          {call.direction === "inbound" ? "Incoming Call" : "Outgoing Call"}
         </p>
       </div>
 
-      {/* Status / Timer */}
-      <p className="text-3xl font-light text-foreground tabular-nums">
+      {/* Timer */}
+      <p className="text-[36px] font-bold text-text-primary tabular-nums">
         {statusLabel}
       </p>
 
       {/* DTMF Keypad */}
       {showKeypad && (
-        <div className="grid grid-cols-3 gap-2 w-full">
+        <div className="grid grid-cols-3 gap-3 w-full max-w-[240px] animate-fade-in">
           {DTMF_KEYS.flat().map((key) => (
             <button
               key={key}
               onClick={() => onDTMF(key)}
-              className="h-12 rounded-lg bg-card hover:bg-card-hover active:bg-border text-lg font-medium text-foreground transition-colors"
+              className="w-14 h-14 mx-auto rounded-full bg-bg-elevated hover:bg-bg-hover active:scale-95 text-xl font-semibold text-text-primary transition-all duration-150"
             >
               {key}
             </button>
@@ -98,112 +131,97 @@ export default function ActiveCallUI({
         </div>
       )}
 
-      {/* Action Buttons Row 1 */}
+      {/* Row 1: Mute, Hold, Keypad */}
       <div className="flex items-center gap-4">
-        <ActionButton
-          icon={call.isMuted ? "mic-off" : "mic"}
+        <ActionBtn
+          icon={call.isMuted ? <MicOff size={18} /> : <Mic size={18} />}
           label={call.isMuted ? "Unmute" : "Mute"}
           active={call.isMuted}
+          activeColor="accent"
           onClick={onToggleMute}
         />
-        <ActionButton
-          icon="pause"
+        <ActionBtn
+          icon={call.isHeld ? <Play size={18} /> : <Pause size={18} />}
           label={call.isHeld ? "Resume" : "Hold"}
           active={call.isHeld}
+          activeColor="amber"
           onClick={onToggleHold}
         />
-        <ActionButton
-          icon="grid"
+        <ActionBtn
+          icon={<Grid3X3 size={18} />}
           label="Keypad"
           active={showKeypad}
           onClick={() => setShowKeypad(!showKeypad)}
         />
       </div>
 
-      {/* Action Buttons Row 2 */}
+      {/* Row 2: Transfer, VM Drop, Add Call */}
       <div className="flex items-center gap-4">
-        <ActionButton icon="shuffle" label="Transfer" onClick={onTransfer} />
+        <ActionBtn
+          icon={<ArrowRightLeft size={18} />}
+          label="Transfer"
+          onClick={onTransfer}
+        />
+        <ActionBtn
+          icon={<Voicemail size={18} />}
+          label="VM Drop"
+          onClick={onVoicemailDrop}
+        />
+        <ActionBtn
+          icon={<UserPlus size={18} />}
+          label="Add Call"
+          onClick={() => {}}
+        />
       </div>
 
-      {/* Hangup Button */}
+      {/* End Call */}
       <button
         onClick={onHangup}
-        className="w-16 h-16 rounded-full bg-red hover:bg-red/90 flex items-center justify-center transition-all active:scale-95 mt-4"
+        className="w-14 h-14 rounded-full bg-red hover:bg-red/90 flex items-center justify-center transition-all duration-150 active:scale-95 mt-4"
         aria-label="End Call"
       >
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="white">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="white">
           <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.69 8.68 7.61 7 12 7s8.31 1.68 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
         </svg>
       </button>
+
+      {/* Calling from */}
+      <p className="text-[12px] text-text-tertiary">
+        Calling from: {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not set"}
+      </p>
     </div>
   );
 }
 
-function ActionButton({
+function ActionBtn({
   icon,
   label,
   active,
+  activeColor = "accent",
   onClick,
 }: {
-  icon: string;
+  icon: React.ReactNode;
   label: string;
   active?: boolean;
+  activeColor?: "accent" | "amber";
   onClick: () => void;
 }) {
-  const iconSvg = {
-    mic: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" />
-        <path d="M19 10v2a7 7 0 01-14 0v-2" />
-        <line x1="12" y1="19" x2="12" y2="23" />
-        <line x1="8" y1="23" x2="16" y2="23" />
-      </svg>
-    ),
-    "mic-off": (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <line x1="1" y1="1" x2="23" y2="23" />
-        <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6" />
-        <path d="M17 16.95A7 7 0 015 12v-2m14 0v2c0 .98-.2 1.92-.57 2.78" />
-        <line x1="12" y1="19" x2="12" y2="23" />
-        <line x1="8" y1="23" x2="16" y2="23" />
-      </svg>
-    ),
-    pause: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="6" y="4" width="4" height="16" />
-        <rect x="14" y="4" width="4" height="16" />
-      </svg>
-    ),
-    grid: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="7" height="7" />
-        <rect x="14" y="3" width="7" height="7" />
-        <rect x="14" y="14" width="7" height="7" />
-        <rect x="3" y="14" width="7" height="7" />
-      </svg>
-    ),
-    shuffle: (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="16 3 21 3 21 8" />
-        <line x1="4" y1="20" x2="21" y2="3" />
-        <polyline points="21 16 21 21 16 21" />
-        <line x1="15" y1="15" x2="21" y2="21" />
-        <line x1="4" y1="4" x2="9" y2="9" />
-      </svg>
-    ),
-  }[icon];
+  const activeBg =
+    activeColor === "amber"
+      ? "bg-amber text-bg-app"
+      : "bg-accent text-text-on-accent";
 
   return (
     <button
       onClick={onClick}
-      className={`flex flex-col items-center gap-1 p-3 rounded-xl transition-colors ${
-        active
-          ? "bg-coral text-white"
-          : "bg-card hover:bg-card-hover text-foreground"
+      className={`flex flex-col items-center gap-1.5 w-16 py-3 rounded-xl transition-all duration-150 hover:-translate-y-px min-h-[44px] ${
+        active ? activeBg : "bg-bg-elevated hover:bg-bg-hover text-text-secondary"
       }`}
     >
-      {iconSvg}
-      <span className="text-[10px] uppercase tracking-wide">{label}</span>
+      {icon}
+      <span className="text-[10px] font-medium uppercase tracking-[0.5px]">
+        {label}
+      </span>
     </button>
   );
 }
