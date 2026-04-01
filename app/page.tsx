@@ -154,7 +154,7 @@ export default function Home() {
 
   return (
     <div className="flex w-full min-h-screen bg-bg-app">
-      <audio ref={audioRef} autoPlay playsInline />
+      <audio ref={audioRef} id="remote-audio" autoPlay playsInline />
 
       <Sidebar
         activePage={activePage}

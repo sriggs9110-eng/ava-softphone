@@ -234,6 +234,14 @@ export function useTelnyxClient() {
 
         console.log("[Telnyx]", notification.type, call.state, call.direction, call.cause);
 
+        // Always try to attach remote audio on any update
+        if (call.remoteStream && audioRef.current) {
+          if (audioRef.current.srcObject !== call.remoteStream) {
+            audioRef.current.srcObject = call.remoteStream;
+          }
+          audioRef.current.play().catch(() => {});
+        }
+
         switch (notification.type) {
           case "callUpdate": {
             const state = call.state;
@@ -272,11 +280,6 @@ export function useTelnyxClient() {
               callStartRef.current = Date.now();
               setAgentStatus("on-call");
               startQualityMonitor();
-
-              if (call.remoteStream && audioRef.current) {
-                audioRef.current.srcObject = call.remoteStream;
-                audioRef.current.play().catch(() => {});
-              }
 
               setActiveCall({
                 number:
@@ -395,6 +398,7 @@ export function useTelnyxClient() {
         callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
         audio: true,
         video: false,
+        remoteElement: audioRef.current || undefined,
       });
 
       callRef.current = call;
@@ -469,6 +473,7 @@ export function useTelnyxClient() {
       callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
       audio: true,
       video: false,
+      remoteElement: audioRef.current || undefined,
     });
     transferCallRef.current = tCall;
     setTransferCall({
