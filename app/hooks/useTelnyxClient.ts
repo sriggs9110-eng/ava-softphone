@@ -9,8 +9,56 @@ import {
   ConnectionStatus,
 } from "@/app/lib/types";
 import { addCallHistoryEntry, getCallHistory } from "@/app/lib/call-history";
+import { QualityLevel } from "@/app/components/ConnectionQuality";
 
-const ACW_DURATION = 30; // seconds
+const ACW_DURATION = 30;
+
+// Web Audio ringtone generator
+function createRingtoneOscillator(audioCtx: AudioContext): { start: () => void; stop: () => void } {
+  let intervalId: ReturnType<typeof setInterval> | null = null;
+  let osc1: OscillatorNode | null = null;
+  let osc2: OscillatorNode | null = null;
+  let gain: GainNode | null = null;
+
+  return {
+    start: () => {
+      let ringing = true;
+      const ring = () => {
+        if (!ringing) return;
+        gain = audioCtx.createGain();
+        gain.gain.value = 0.15;
+        gain.connect(audioCtx.destination);
+
+        osc1 = audioCtx.createOscillator();
+        osc1.frequency.value = 440;
+        osc1.connect(gain);
+        osc1.start();
+
+        osc2 = audioCtx.createOscillator();
+        osc2.frequency.value = 480;
+        osc2.connect(gain);
+        osc2.start();
+
+        // Ring for 1s, silence for 2s
+        setTimeout(() => {
+          osc1?.stop();
+          osc2?.stop();
+          gain?.disconnect();
+        }, 1000);
+      };
+
+      ring();
+      intervalId = setInterval(ring, 3000);
+    },
+    stop: () => {
+      if (intervalId) clearInterval(intervalId);
+      intervalId = null;
+      try { osc1?.stop(); } catch {}
+      try { osc2?.stop(); } catch {}
+      try { gain?.disconnect(); } catch {}
+    },
+  };
+}
 
 export function useTelnyxClient() {
   const clientRef = useRef<TelnyxRTC | null>(null);
@@ -26,10 +74,15 @@ export function useTelnyxClient() {
   const [transferCall, setTransferCall] = useState<ActiveCallInfo | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("available");
   const [acwCountdown, setAcwCountdown] = useState<number | null>(null);
+  const [qualityLevel, setQualityLevel] = useState<QualityLevel>("unknown");
+  const [latency, setLatency] = useState<number | null>(null);
+  const [packetLoss, setPacketLoss] = useState<number | null>(null);
   const acwTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const ringtoneRef = useRef<HTMLAudioElement | null>(null);
+  const ringtoneOscRef = useRef<{ start: () => void; stop: () => void } | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
   const ringtoneTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qualityIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     setCallHistory(getCallHistory());
@@ -72,10 +125,8 @@ export function useTelnyxClient() {
   );
 
   const stopRingtone = useCallback(() => {
-    if (ringtoneRef.current) {
-      ringtoneRef.current.pause();
-      ringtoneRef.current.currentTime = 0;
-    }
+    ringtoneOscRef.current?.stop();
+    ringtoneOscRef.current = null;
     if (ringtoneTimeoutRef.current) {
       clearTimeout(ringtoneTimeoutRef.current);
       ringtoneTimeoutRef.current = null;
@@ -83,22 +134,72 @@ export function useTelnyxClient() {
   }, []);
 
   const playRingtone = useCallback(() => {
-    if (!ringtoneRef.current) {
-      ringtoneRef.current = new Audio("/ringtone.wav");
-      ringtoneRef.current.loop = true;
+    if (!audioCtxRef.current) {
+      audioCtxRef.current = new AudioContext();
     }
-    ringtoneRef.current.play().catch(() => {});
+    if (audioCtxRef.current.state === "suspended") {
+      audioCtxRef.current.resume();
+    }
+    stopRingtone();
+    const osc = createRingtoneOscillator(audioCtxRef.current);
+    ringtoneOscRef.current = osc;
+    osc.start();
+
     // Auto-dismiss after 30s
     ringtoneTimeoutRef.current = setTimeout(() => {
       stopRingtone();
-      if (inboundCall) {
-        const number = inboundCall.options.callerNumber || "Unknown";
-        inboundCall.hangup();
-        setInboundCall(null);
-        addToHistory(number, "inbound", 0, "missed");
-      }
+      setInboundCall((current) => {
+        if (current) {
+          const number = current.options.callerNumber || "Unknown";
+          current.hangup();
+          addToHistory(number, "inbound", 0, "missed");
+        }
+        return null;
+      });
     }, 30000);
-  }, [stopRingtone, inboundCall, addToHistory]);
+  }, [stopRingtone, addToHistory]);
+
+  // Connection quality monitoring
+  const startQualityMonitor = useCallback(() => {
+    qualityIntervalRef.current = setInterval(() => {
+      if (!callRef.current?.peer?.instance) return;
+      callRef.current.peer.instance.getStats().then((stats) => {
+        stats.forEach((report) => {
+          if (report.type === "candidate-pair" && report.state === "succeeded") {
+            const rtt = report.currentRoundTripTime;
+            if (rtt !== undefined) {
+              const rttMs = Math.round(rtt * 1000);
+              setLatency(rttMs);
+              if (rttMs < 150) setQualityLevel("good");
+              else if (rttMs < 300) setQualityLevel("degraded");
+              else setQualityLevel("poor");
+            }
+          }
+          if (report.type === "inbound-rtp" && report.kind === "audio") {
+            const lost = report.packetsLost || 0;
+            const received = report.packetsReceived || 0;
+            const total = lost + received;
+            if (total > 0) {
+              const loss = (lost / total) * 100;
+              setPacketLoss(loss);
+              if (loss > 5) setQualityLevel("poor");
+              else if (loss > 1) setQualityLevel("degraded");
+            }
+          }
+        });
+      }).catch(() => {});
+    }, 3000);
+  }, []);
+
+  const stopQualityMonitor = useCallback(() => {
+    if (qualityIntervalRef.current) {
+      clearInterval(qualityIntervalRef.current);
+      qualityIntervalRef.current = null;
+    }
+    setQualityLevel("unknown");
+    setLatency(null);
+    setPacketLoss(null);
+  }, []);
 
   const connect = useCallback(async () => {
     if (clientRef.current) return;
@@ -138,7 +239,6 @@ export function useTelnyxClient() {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
-              // Reject if DND
               if (agentStatus === "dnd") {
                 call.hangup();
                 return;
@@ -171,6 +271,7 @@ export function useTelnyxClient() {
               callRef.current = call;
               callStartRef.current = Date.now();
               setAgentStatus("on-call");
+              startQualityMonitor();
 
               if (call.remoteStream && audioRef.current) {
                 audioRef.current.srcObject = call.remoteStream;
@@ -217,6 +318,7 @@ export function useTelnyxClient() {
 
             if (state === "hangup" || state === "destroy") {
               stopRingtone();
+              stopQualityMonitor();
 
               if (transferCallRef.current && call.id === transferCallRef.current.id) {
                 transferCallRef.current = null;
@@ -259,7 +361,6 @@ export function useTelnyxClient() {
                 setTransferCall(null);
               }
 
-              // Start ACW timer
               startAcw();
             }
             break;
@@ -282,7 +383,7 @@ export function useTelnyxClient() {
     } catch {
       setConnectionStatus("disconnected");
     }
-  }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw]);
+  }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw, startQualityMonitor, stopQualityMonitor]);
 
   const makeCall = useCallback(
     (number: string) => {
@@ -442,7 +543,6 @@ export function useTelnyxClient() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ call_control_id: callControlId }),
     }).catch(() => {});
-    // Hang up our end immediately
     callRef.current.hangup();
   }, []);
 
@@ -463,6 +563,8 @@ export function useTelnyxClient() {
         clientRef.current = null;
       }
       if (acwTimerRef.current) clearInterval(acwTimerRef.current);
+      stopQualityMonitor();
+      stopRingtone();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -476,6 +578,9 @@ export function useTelnyxClient() {
     transferCall,
     agentStatus,
     acwCountdown,
+    qualityLevel,
+    latency,
+    packetLoss,
     audioRef,
     makeCall,
     answerCall,

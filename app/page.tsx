@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { useTelnyxClient } from "@/app/hooks/useTelnyxClient";
 import Sidebar, { NavPage } from "@/app/components/Sidebar";
 import DialPad from "@/app/components/DialPad";
@@ -12,6 +12,8 @@ import CallHistoryPage from "@/app/components/CallHistoryPage";
 import MonitorPage from "@/app/components/MonitorPage";
 import ReportsPage from "@/app/components/ReportsPage";
 import TranscriptsPage from "@/app/components/TranscriptsPage";
+import AfterCallWork from "@/app/components/AfterCallWork";
+import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
 
 const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
@@ -33,6 +35,9 @@ export default function Home() {
     transferCall,
     agentStatus,
     acwCountdown,
+    qualityLevel,
+    latency,
+    packetLoss,
     audioRef,
     makeCall,
     answerCall,
@@ -53,6 +58,7 @@ export default function Home() {
   const [activePage, setActivePage] = useState<NavPage>("phone");
   const [showTransfer, setShowTransfer] = useState(false);
   const [showVmConfirm, setShowVmConfirm] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
 
   const recentNumbers = useMemo(
     () => [...new Set(callHistory.map((e) => e.number))],
@@ -83,10 +89,67 @@ export default function Home() {
     setShowVmConfirm(false);
   }, [voicemailDrop]);
 
-  // Override page title when on active call
+  const handleAcwReady = useCallback(() => {
+    changeAgentStatus("available");
+  }, [changeAgentStatus]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput =
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable;
+
+      // ? always toggles shortcuts
+      if (e.key === "?" && !isInput) {
+        e.preventDefault();
+        setShowShortcuts((prev) => !prev);
+        return;
+      }
+
+      // Don't intercept when typing in inputs (except Escape/Enter for call actions)
+      if (isInput && e.key !== "Escape" && e.key !== "Enter") return;
+
+      if (e.key === "Escape") {
+        if (showShortcuts) {
+          setShowShortcuts(false);
+          return;
+        }
+        if (activeCall) {
+          e.preventDefault();
+          hangup();
+        }
+        return;
+      }
+
+      if (e.key === "Enter" && !activeCall && activePage === "phone") {
+        // Enter handled by DialPad's own input
+        return;
+      }
+
+      if (!activeCall) return;
+
+      if (e.key === "m" || e.key === "M") {
+        e.preventDefault();
+        toggleMute();
+      } else if (e.key === "h" || e.key === "H") {
+        e.preventDefault();
+        toggleHold();
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeCall, hangup, toggleMute, toggleHold, activePage, showShortcuts]);
+
+  // Page title override
   const pageInfo =
     activePage === "phone" && activeCall
       ? { title: "Active Call", subtitle: "In progress" }
+      : activePage === "phone" && agentStatus === "after-call-work"
+      ? { title: "After Call Work", subtitle: "Wrap up your call" }
       : PAGE_TITLES[activePage];
 
   return (
@@ -100,6 +163,10 @@ export default function Home() {
         agentStatus={agentStatus}
         onAgentStatusChange={changeAgentStatus}
         acwCountdown={acwCountdown}
+        qualityLevel={qualityLevel}
+        latency={latency}
+        packetLoss={packetLoss}
+        onShowShortcuts={() => setShowShortcuts(true)}
       />
 
       {/* Inbound call overlay */}
@@ -152,6 +219,12 @@ export default function Home() {
         </div>
       )}
 
+      {/* Keyboard shortcuts overlay */}
+      <KeyboardShortcuts
+        open={showShortcuts}
+        onClose={() => setShowShortcuts(false)}
+      />
+
       {/* Main content */}
       <main className="flex-1 flex flex-col overflow-y-auto">
         <div className="w-full max-w-[1200px] mx-auto px-6 py-8">
@@ -177,6 +250,11 @@ export default function Home() {
                   onDTMF={sendDTMF}
                   onTransfer={handleTransferClick}
                   onVoicemailDrop={handleVmDrop}
+                />
+              ) : agentStatus === "after-call-work" && acwCountdown !== null ? (
+                <AfterCallWork
+                  countdown={acwCountdown}
+                  onReady={handleAcwReady}
                 />
               ) : (
                 <div className="flex flex-col items-center gap-8">
@@ -279,10 +357,21 @@ export default function Home() {
               </div>
               <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
                 <h3 className="text-sm font-semibold text-text-primary mb-1">
+                  Keyboard Shortcuts
+                </h3>
+                <button
+                  onClick={() => setShowShortcuts(true)}
+                  className="mt-2 text-[13px] text-accent hover:underline"
+                >
+                  View all shortcuts
+                </button>
+              </div>
+              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-text-primary mb-1">
                   Version
                 </h3>
                 <p className="text-[12px] text-text-tertiary mt-1">
-                  Ava Softphone v0.2.0
+                  Ava Softphone v0.3.0
                 </p>
               </div>
             </div>

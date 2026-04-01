@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getLocalNumber } from "@/app/lib/local-presence";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -6,7 +7,6 @@ export async function POST(req: NextRequest) {
 
   const apiKey = process.env.TELNYX_API_KEY;
   const connectionId = process.env.TELNYX_CONNECTION_ID;
-  const defaultFrom = process.env.TELNYX_PHONE_NUMBER;
 
   if (!apiKey || !connectionId) {
     return NextResponse.json(
@@ -14,6 +14,9 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+
+  // Use local presence: match area code to a local number
+  const fromNumber = from || getLocalNumber(to);
 
   try {
     const response = await fetch("https://api.telnyx.com/v2/calls", {
@@ -25,7 +28,7 @@ export async function POST(req: NextRequest) {
       body: JSON.stringify({
         connection_id: connectionId,
         to,
-        from: from || defaultFrom,
+        from: fromNumber,
         record: "record-from-answer",
       }),
     });

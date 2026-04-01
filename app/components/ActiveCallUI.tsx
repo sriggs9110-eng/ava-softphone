@@ -41,6 +41,8 @@ export default function ActiveCallUI({
 }: ActiveCallUIProps) {
   const [elapsed, setElapsed] = useState(0);
   const [showKeypad, setShowKeypad] = useState(false);
+  const [dtmfDigits, setDtmfDigits] = useState("");
+  const [dtmfFlash, setDtmfFlash] = useState<string | null>(null);
 
   useEffect(() => {
     if (call.status !== "active" || !call.startTime) {
@@ -59,6 +61,16 @@ export default function ActiveCallUI({
     return `${m}:${s}`;
   }, []);
 
+  const handleDTMF = useCallback(
+    (digit: string) => {
+      onDTMF(digit);
+      setDtmfDigits((prev) => prev + digit);
+      setDtmfFlash(digit);
+      setTimeout(() => setDtmfFlash(null), 300);
+    },
+    [onDTMF]
+  );
+
   const statusLabel =
     call.status === "dialing"
       ? "Dialing..."
@@ -71,7 +83,7 @@ export default function ActiveCallUI({
       : call.status;
 
   return (
-    <div className="flex flex-col items-center gap-8 w-full max-w-[380px] mx-auto py-8 animate-slide-up">
+    <div className="flex flex-col items-center gap-8 w-full max-w-[380px] mx-auto py-8 animate-slide-up relative">
       {/* Status indicator */}
       {call.status === "active" && (
         <div className="flex items-center gap-2">
@@ -116,21 +128,6 @@ export default function ActiveCallUI({
         {statusLabel}
       </p>
 
-      {/* DTMF Keypad */}
-      {showKeypad && (
-        <div className="grid grid-cols-3 gap-3 w-full max-w-[240px] animate-fade-in">
-          {DTMF_KEYS.flat().map((key) => (
-            <button
-              key={key}
-              onClick={() => onDTMF(key)}
-              className="w-14 h-14 mx-auto rounded-full bg-bg-elevated hover:bg-bg-hover active:scale-95 text-xl font-semibold text-text-primary transition-all duration-150"
-            >
-              {key}
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* Row 1: Mute, Hold, Keypad */}
       <div className="flex items-center gap-4">
         <ActionBtn
@@ -151,7 +148,10 @@ export default function ActiveCallUI({
           icon={<Grid3X3 size={18} />}
           label="Keypad"
           active={showKeypad}
-          onClick={() => setShowKeypad(!showKeypad)}
+          onClick={() => {
+            setShowKeypad(!showKeypad);
+            if (!showKeypad) setDtmfDigits("");
+          }}
         />
       </div>
 
@@ -189,6 +189,54 @@ export default function ActiveCallUI({
       <p className="text-[12px] text-text-tertiary">
         Calling from: {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not set"}
       </p>
+
+      {/* DTMF Keypad Overlay */}
+      {showKeypad && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-bg-app/70 backdrop-blur-sm"
+          onClick={() => setShowKeypad(false)}
+        >
+          <div
+            className="bg-bg-surface border border-border-subtle rounded-xl p-5 w-full max-w-[280px] animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Digit display */}
+            <div className="text-center mb-4 h-8">
+              {dtmfDigits && (
+                <p className="text-[20px] font-semibold text-text-primary tracking-[2px] tabular-nums">
+                  {dtmfDigits}
+                </p>
+              )}
+              {dtmfFlash && (
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[48px] font-bold text-accent opacity-50 pointer-events-none animate-fade-in">
+                  {dtmfFlash}
+                </div>
+              )}
+            </div>
+
+            {/* Keys */}
+            <div className="grid grid-cols-3 gap-3">
+              {DTMF_KEYS.flat().map((key) => (
+                <button
+                  key={key}
+                  onClick={() => handleDTMF(key)}
+                  className="w-14 h-14 mx-auto rounded-full bg-bg-elevated hover:bg-bg-hover active:scale-95 text-xl font-semibold text-text-primary transition-all duration-100"
+                >
+                  {key}
+                </button>
+              ))}
+            </div>
+
+            {/* Close */}
+            <button
+              onClick={() => setShowKeypad(false)}
+              className="w-full mt-4 py-2.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-medium transition-colors"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

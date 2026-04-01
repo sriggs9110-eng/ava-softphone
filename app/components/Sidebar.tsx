@@ -9,6 +9,8 @@ import {
   Settings,
 } from "lucide-react";
 import { AgentStatus, ConnectionStatus } from "@/app/lib/types";
+import ConnectionQuality, { QualityLevel } from "@/app/components/ConnectionQuality";
+import { ShortcutsButton } from "@/app/components/KeyboardShortcuts";
 
 export type NavPage =
   | "phone"
@@ -25,6 +27,10 @@ interface SidebarProps {
   agentStatus: AgentStatus;
   onAgentStatusChange: (status: AgentStatus) => void;
   acwCountdown: number | null;
+  qualityLevel: QualityLevel;
+  latency: number | null;
+  packetLoss: number | null;
+  onShowShortcuts: () => void;
 }
 
 const NAV_ITEMS: { page: NavPage; icon: typeof Phone; label: string }[] = [
@@ -56,6 +62,10 @@ export default function Sidebar({
   agentStatus,
   onAgentStatusChange,
   acwCountdown,
+  qualityLevel,
+  latency,
+  packetLoss,
+  onShowShortcuts,
 }: SidebarProps) {
   return (
     <nav className="w-[72px] bg-bg-surface border-r border-border-subtle flex flex-col items-center py-5 gap-1.5 shrink-0">
@@ -151,6 +161,12 @@ export default function Sidebar({
           )}
         </div>
       </div>
+
+      {/* Shortcuts */}
+      <ShortcutsButton onClick={onShowShortcuts} />
+
+      {/* Connection Quality */}
+      <ConnectionQuality level={qualityLevel} latency={latency} packetLoss={packetLoss} />
 
       {/* Connection Status */}
       <div className="group relative flex items-center justify-center w-10 h-10 mt-1">
