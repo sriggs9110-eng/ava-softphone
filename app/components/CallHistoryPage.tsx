@@ -52,6 +52,11 @@ export default function CallHistoryPage({
               number: entry.number,
               direction: entry.direction,
               duration: entry.duration,
+              status: entry.status,
+              timestamp: entry.timestamp,
+              transcript: entry.transcript
+                ?.map((t) => `${t.speaker} [${t.timestamp}]: ${t.text}`)
+                .join("\n"),
             },
           }),
         });

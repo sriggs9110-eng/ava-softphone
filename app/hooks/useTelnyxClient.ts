@@ -9,6 +9,7 @@ import {
   ConnectionStatus,
 } from "@/app/lib/types";
 import { addCallHistoryEntry, getCallHistory } from "@/app/lib/call-history";
+import { getLocalNumber } from "@/app/lib/local-presence";
 import { QualityLevel } from "@/app/components/ConnectionQuality";
 
 const ACW_DURATION = 30;
@@ -403,9 +404,11 @@ export function useTelnyxClient() {
         audioCtxRef.current.resume();
       }
 
+      const fromNumber = getLocalNumber(number);
+
       const call = clientRef.current.newCall({
         destinationNumber: number,
-        callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
+        callerNumber: fromNumber,
         audio: true,
         video: false,
         remoteElement: audioRef.current || undefined,
