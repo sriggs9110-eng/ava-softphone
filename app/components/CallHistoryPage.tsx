@@ -5,7 +5,6 @@ import {
   PhoneIncoming,
   PhoneOutgoing,
   Play,
-  Pause,
   Search,
   TrendingUp,
   Loader2,
@@ -33,7 +32,6 @@ export default function CallHistoryPage({
   const [filter, setFilter] = useState<FilterType>("all");
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [playingId, setPlayingId] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
 
   const filtered = entries.filter((e) => {
@@ -102,7 +100,8 @@ export default function CallHistoryPage({
   };
 
   const toggleExpand = (id: string) => {
-    setExpandedId(expandedId === id ? null : id);
+    console.log("[History] toggleExpand:", id, "current:", expandedId, "match:", expandedId === id);
+    setExpandedId((prev) => prev === id ? null : id);
   };
 
   return (
@@ -198,19 +197,14 @@ export default function CallHistoryPage({
                   {/* Status */}
                   <StatusBadge status={entry.status} />
 
-                  {/* Recording */}
+                  {/* Recording indicator */}
                   {entry.recordingUrl && (
                     <button
-                      onClick={() =>
-                        setPlayingId(playingId === entry.id ? null : entry.id)
-                      }
+                      onClick={() => toggleExpand(entry.id)}
                       className="w-7 h-7 rounded-full bg-bg-elevated hover:bg-bg-hover flex items-center justify-center text-text-secondary transition-colors"
+                      title="Has recording — click to expand"
                     >
-                      {playingId === entry.id ? (
-                        <Pause size={12} />
-                      ) : (
-                        <Play size={12} />
-                      )}
+                      <Play size={12} />
                     </button>
                   )}
 
@@ -245,29 +239,18 @@ export default function CallHistoryPage({
                 {/* Expanded Details */}
                 {isExpanded && (
                   <div className="ml-14 mr-4 mb-3 p-4 bg-bg-surface border border-border-subtle rounded-xl animate-fade-in space-y-4">
-                    {/* Recording player placeholder */}
+                    {/* Recording player */}
                     {entry.recordingUrl && (
-                      <div className="flex items-center gap-3 p-3 bg-bg-elevated rounded-lg">
-                        <button
-                          onClick={() =>
-                            setPlayingId(
-                              playingId === entry.id ? null : entry.id
-                            )
-                          }
-                          className="w-8 h-8 rounded-full bg-accent flex items-center justify-center text-white shrink-0"
-                        >
-                          {playingId === entry.id ? (
-                            <Pause size={14} />
-                          ) : (
-                            <Play size={14} />
-                          )}
-                        </button>
-                        <div className="flex-1 h-1.5 bg-border rounded-full overflow-hidden">
-                          <div className="h-full w-0 bg-accent rounded-full" />
-                        </div>
-                        <span className="text-[11px] text-text-tertiary tabular-nums">
-                          {formatCallDuration(entry.duration)}
-                        </span>
+                      <div className="p-3 bg-bg-elevated rounded-lg space-y-2">
+                        <audio
+                          controls
+                          src={entry.recordingUrl}
+                          className="w-full h-8 [&::-webkit-media-controls-panel]:bg-bg-elevated"
+                          preload="metadata"
+                        />
+                        <p className="text-[10px] text-text-tertiary truncate">
+                          {entry.recordingUrl}
+                        </p>
                       </div>
                     )}
 

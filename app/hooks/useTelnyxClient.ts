@@ -409,9 +409,9 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw, startQualityMonitor, stopQualityMonitor]);
 
   const makeCall = useCallback(
-    (number: string) => {
-      if (!clientRef.current || connectionStatus !== "connected") return;
-      if (agentStatus === "dnd") return;
+    (number: string): string | undefined => {
+      if (!clientRef.current || connectionStatus !== "connected") return undefined;
+      if (agentStatus === "dnd") return undefined;
 
       // Unlock audio element with user gesture (required on production domains)
       if (audioRef.current) {
@@ -434,6 +434,8 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       });
 
       callRef.current = call;
+      const ccid = call.telnyxIDs?.telnyxCallControlId || undefined;
+
       setAgentStatus("on-call");
       setActiveCall({
         number,
@@ -442,13 +444,16 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
         startTime: null,
         isMuted: false,
         isHeld: false,
+        callControlId: ccid,
       });
+
+      return ccid;
     },
     [connectionStatus, agentStatus]
   );
 
-  const answerCall = useCallback(() => {
-    if (!inboundCall) return;
+  const answerCall = useCallback((): string | undefined => {
+    if (!inboundCall) return undefined;
     stopRingtone();
     // Unlock audio element with user gesture
     if (audioRef.current) {
@@ -456,6 +461,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       audioRef.current.play().catch(() => {});
     }
     inboundCall.answer({ video: false });
+    return inboundCall.telnyxIDs?.telnyxCallControlId || undefined;
   }, [inboundCall, stopRingtone]);
 
   const rejectCall = useCallback(() => {

@@ -17,7 +17,7 @@ import AfterCallWork from "@/app/components/AfterCallWork";
 import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
 import { Loader2 } from "lucide-react";
-import { insertCallLog, updateCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
+import { insertCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
 import { CallHistoryEntry } from "@/app/lib/types";
 import { useRouter } from "next/navigation";
 
@@ -147,15 +147,18 @@ export default function Home() {
   // Create call log in Supabase when making/receiving a call
   const handleMakeCall = useCallback(
     async (number: string) => {
-      makeCall(number);
+      // makeCall returns the callControlId immediately from the SDK
+      const ccid = makeCall(number);
       if (user) {
         const log = await insertCallLog({
           user_id: user.id,
           direction: "outbound",
           phone_number: number,
           status: "initiated",
+          call_control_id: ccid,
         });
         if (log) activeCallLogIdRef.current = log.id;
+        console.log("[Call] Created outbound log, ccid:", ccid, "logId:", log?.id);
       }
     },
     [makeCall, user]
@@ -163,31 +166,23 @@ export default function Home() {
 
   const handleAnswerCall = useCallback(async () => {
     const callerNumber = inboundCall?.options?.callerNumber || "Unknown";
-    answerCall();
+    const ccid = answerCall();
     if (user) {
       const log = await insertCallLog({
         user_id: user.id,
         direction: "inbound",
         phone_number: callerNumber,
         status: "connected",
+        call_control_id: ccid,
       });
       if (log) activeCallLogIdRef.current = log.id;
+      console.log("[Call] Created inbound log, ccid:", ccid, "logId:", log?.id);
     }
   }, [answerCall, inboundCall, user]);
 
   const handleHangup = useCallback(() => {
     hangup();
   }, [hangup]);
-
-  // When call becomes active, save call_control_id to the Supabase row
-  useEffect(() => {
-    if (activeCall?.callControlId && activeCallLogIdRef.current) {
-      updateCallLog(activeCallLogIdRef.current, {
-        status: "connected",
-        call_control_id: activeCall.callControlId,
-      });
-    }
-  }, [activeCall?.callControlId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Combine Supabase entries with any live local entries not yet in Supabase
   const callHistory = supabaseEntries.length > 0 ? supabaseEntries : localCallHistory;
