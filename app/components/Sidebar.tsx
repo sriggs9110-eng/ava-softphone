@@ -155,7 +155,7 @@ export default function Sidebar({
           />
         </button>
         {/* Dropdown */}
-        <div className="absolute left-full bottom-0 ml-3 bg-bg-surface border border-border-subtle rounded-xl overflow-hidden opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 w-52 shadow-2xl">
+        <div className="absolute left-full bottom-full mb-2 ml-3 bg-bg-surface border border-border-subtle rounded-xl overflow-hidden opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 w-52 shadow-2xl">
           {/* User info */}
           <div className="px-3 py-2.5 border-b border-border-subtle">
             <p className="text-[13px] font-medium text-text-primary truncate">
