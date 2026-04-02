@@ -11,7 +11,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { CallHistoryEntry, AIAnalysis } from "@/app/lib/types";
-import { updateCallHistoryEntry } from "@/app/lib/call-history";
+import { updateCallLog } from "@/lib/call-logs";
 
 interface CallHistoryPageProps {
   entries: CallHistoryEntry[];
@@ -65,18 +65,29 @@ export default function CallHistoryPage({
 
         if (res.ok) {
           const analysis: AIAnalysis = await res.json();
-          const updated = updateCallHistoryEntry(entry.id, {
-            aiAnalysis: analysis,
+
+          // Save to Supabase
+          await updateCallLog(entry.id, {
+            ai_analysis: analysis as unknown as Record<string, unknown>,
+            ai_summary: analysis.summary,
+            ai_score: analysis.score,
           });
+
+          // Update local state
+          const updated = entries.map((e) =>
+            e.id === entry.id ? { ...e, aiAnalysis: analysis } : e
+          );
           onUpdate(updated);
+        } else {
+          console.error("[AI Analyze] API returned", res.status, await res.text());
         }
-      } catch {
-        // silently fail
+      } catch (err) {
+        console.error("[AI Analyze] Error:", err);
       } finally {
         setAnalyzingId(null);
       }
     },
-    [onUpdate]
+    [entries, onUpdate]
   );
 
   const scoreColor = (score: number) => {

@@ -61,7 +61,17 @@ function createRingtoneOscillator(audioCtx: AudioContext): { start: () => void; 
   };
 }
 
-export function useTelnyxClient() {
+export interface CallEndInfo {
+  number: string;
+  direction: "inbound" | "outbound";
+  duration: number;
+  status: "completed" | "missed" | "rejected" | "voicemail" | "no-answer";
+}
+
+export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
+  const onCallEndRef = useRef(onCallEnd);
+  onCallEndRef.current = onCallEnd;
+
   const clientRef = useRef<TelnyxRTC | null>(null);
   const callRef = useRef<Call | null>(null);
   const transferCallRef = useRef<Call | null>(null);
@@ -343,12 +353,20 @@ export function useTelnyxClient() {
                 call.direction === "inbound"
                   ? call.options.callerNumber || "Unknown"
                   : call.options.destinationNumber || "";
+              const finalStatus = duration > 0 ? "completed" : "missed";
               addToHistory(
                 number,
                 call.direction as "inbound" | "outbound",
                 duration,
-                duration > 0 ? "completed" : "missed"
+                finalStatus
               );
+
+              onCallEndRef.current?.({
+                number,
+                direction: call.direction as "inbound" | "outbound",
+                duration,
+                status: finalStatus,
+              });
 
               callRef.current = null;
               callStartRef.current = null;

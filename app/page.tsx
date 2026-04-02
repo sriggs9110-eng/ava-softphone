@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
-import { useTelnyxClient } from "@/app/hooks/useTelnyxClient";
+import { useTelnyxClient, CallEndInfo } from "@/app/hooks/useTelnyxClient";
 import { useAuth } from "@/lib/auth-context";
 import Sidebar, { NavPage } from "@/app/components/Sidebar";
 import DialPad from "@/app/components/DialPad";
@@ -101,7 +101,7 @@ export default function Home() {
     voicemailDrop,
     changeAgentStatus,
     setCallHistory: setLocalCallHistory,
-  } = useTelnyxClient();
+  } = useTelnyxClient(handleCallEnd);
 
   const [activePage, setActivePage] = useState<NavPage>("phone");
   const [showTransfer, setShowTransfer] = useState(false);
@@ -121,11 +121,23 @@ export default function Home() {
     loadCallLogs();
   }, [loadCallLogs]);
 
+  // Called by the Telnyx hook on ANY call end (user hangup or remote hangup)
+  function handleCallEnd(info: CallEndInfo) {
+    if (activeCallLogIdRef.current) {
+      updateCallLog(activeCallLogIdRef.current, {
+        status: info.status === "completed" ? "completed" : "missed",
+        duration_seconds: info.duration,
+      }).then(() => {
+        activeCallLogIdRef.current = null;
+        setTimeout(loadCallLogs, 500);
+      });
+    }
+  }
+
   // Sync agent status changes to Supabase
   const handleAgentStatusChange = useCallback(
     (status: typeof agentStatus) => {
       changeAgentStatus(status);
-      // Map local status names to DB values
       const dbStatus: Record<string, string> = {
         available: "available",
         "on-call": "on_call",
@@ -168,22 +180,9 @@ export default function Home() {
     }
   }, [answerCall, inboundCall, user]);
 
-  const handleHangup = useCallback(async () => {
-    // Update call log before hanging up
-    if (activeCallLogIdRef.current && activeCall) {
-      const duration = activeCall.startTime
-        ? Math.floor((Date.now() - activeCall.startTime) / 1000)
-        : 0;
-      await updateCallLog(activeCallLogIdRef.current, {
-        status: duration > 0 ? "completed" : "missed",
-        duration_seconds: duration,
-      });
-      activeCallLogIdRef.current = null;
-      // Reload call logs after call ends
-      setTimeout(loadCallLogs, 500);
-    }
+  const handleHangup = useCallback(() => {
     hangup();
-  }, [hangup, activeCall, loadCallLogs]);
+  }, [hangup]);
 
   // Combine Supabase entries with any live local entries not yet in Supabase
   const callHistory = supabaseEntries.length > 0 ? supabaseEntries : localCallHistory;
