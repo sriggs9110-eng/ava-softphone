@@ -112,13 +112,21 @@ export default function TranscriptsPage({ entries }: TranscriptsPageProps) {
 
             return (
               <div key={entry.id}>
-                <button
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() =>
                     setExpandedId(
                       expandedId === entry.id ? null : entry.id
                     )
                   }
-                  className="w-full text-left px-4 py-3 hover:bg-bg-elevated rounded-xl transition-all duration-150 group"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setExpandedId(expandedId === entry.id ? null : entry.id);
+                    }
+                  }}
+                  className="w-full text-left px-4 py-3 hover:bg-bg-elevated rounded-xl transition-all duration-150 group cursor-pointer"
                 >
                   <div className="flex items-center gap-3">
                     <div className="flex-1 min-w-0">
@@ -157,7 +165,7 @@ export default function TranscriptsPage({ entries }: TranscriptsPageProps) {
                       ))}
                     </div>
                   )}
-                </button>
+                </div>
 
                 {/* Expanded transcript */}
                 {expandedId === entry.id && entry.transcript && (

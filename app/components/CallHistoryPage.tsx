@@ -43,6 +43,7 @@ export default function CallHistoryPage({
 
   const handleAnalyze = useCallback(
     async (entry: CallHistoryEntry) => {
+      console.log("[AI Analyze] Starting analysis for:", entry.id, entry.number);
       setAnalyzingId(entry.id);
       try {
         const res = await fetch("/api/ai/analyze-call", {
@@ -143,9 +144,10 @@ export default function CallHistoryPage({
               <div
                 role="button"
                 tabIndex={0}
-                onClick={() =>
-                  setExpandedId(expandedId === entry.id ? null : entry.id)
-                }
+                onClick={() => {
+                  console.log("[History] Row clicked, entry.id:", entry.id, "expandedId:", expandedId);
+                  setExpandedId(expandedId === entry.id ? null : entry.id);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
@@ -220,6 +222,7 @@ export default function CallHistoryPage({
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
+                      console.log("[History] AI button clicked, entry.id:", entry.id);
                       handleAnalyze(entry);
                     }}
                     disabled={analyzingId === entry.id}
