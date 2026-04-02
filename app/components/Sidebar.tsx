@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect, useRef } from "react";
 import {
   Phone,
   Clock,
@@ -141,23 +142,91 @@ export default function Sidebar({
       <div className="flex-1" />
 
       {/* User Info + Agent Status */}
-      <div className="group relative">
-        <button className="w-10 h-10 rounded-full flex items-center justify-center relative">
-          <div
-            className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-semibold ${
-              AVATAR_COLORS[user?.role || "agent"]
-            }`}
-          >
-            {user?.full_name?.charAt(0)?.toUpperCase() || "?"}
-          </div>
-          <div
-            className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${STATUS_COLORS[agentStatus]} border-2 border-bg-surface`}
-          />
-        </button>
-        {/* Dropdown */}
-        {/* Invisible bridge to keep hover alive across the gap */}
-        <div className="absolute left-full bottom-0 w-4 h-full pointer-events-none group-hover:pointer-events-auto" />
-        <div className="absolute left-full bottom-full mb-0 ml-1 bg-bg-surface border border-border-subtle rounded-xl overflow-hidden opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 w-52 shadow-2xl">
+      <UserMenu
+        user={user}
+        agentStatus={agentStatus}
+        acwCountdown={acwCountdown}
+        onAgentStatusChange={onAgentStatusChange}
+        logout={logout}
+      />
+
+      {/* Shortcuts */}
+      <ShortcutsButton onClick={onShowShortcuts} />
+
+      {/* Connection Quality */}
+      <ConnectionQuality level={qualityLevel} latency={latency} packetLoss={packetLoss} />
+
+      {/* Connection Status */}
+      <div className="group relative flex items-center justify-center w-10 h-10 mt-1">
+        <div
+          className={`w-2.5 h-2.5 rounded-full ${
+            connectionStatus === "connected"
+              ? "bg-green"
+              : connectionStatus === "connecting"
+              ? "bg-amber animate-pulse"
+              : "bg-red"
+          }`}
+        />
+        <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-bg-elevated border border-border-subtle rounded-lg text-[11px] text-text-secondary whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+          {connectionStatus === "connected"
+            ? "Connected to Telnyx"
+            : connectionStatus === "connecting"
+            ? "Connecting..."
+            : "Disconnected"}
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+function UserMenu({
+  user,
+  agentStatus,
+  acwCountdown,
+  onAgentStatusChange,
+  logout,
+}: {
+  user: { full_name: string; role: string; email: string } | null;
+  agentStatus: AgentStatus;
+  acwCountdown: number | null;
+  onAgentStatusChange: (status: AgentStatus) => void;
+  logout: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close on click outside
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  return (
+    <div className="relative" ref={menuRef}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-10 h-10 rounded-full flex items-center justify-center relative"
+      >
+        <div
+          className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-semibold ${
+            AVATAR_COLORS[user?.role || "agent"]
+          }`}
+        >
+          {user?.full_name?.charAt(0)?.toUpperCase() || "?"}
+        </div>
+        <div
+          className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${STATUS_COLORS[agentStatus]} border-2 border-bg-surface`}
+        />
+      </button>
+
+      {open && (
+        <div className="absolute left-full bottom-0 ml-2 bg-bg-surface border border-border-subtle rounded-xl overflow-hidden z-50 w-52 shadow-2xl animate-fade-in">
           {/* User info */}
           <div className="px-3 py-2.5 border-b border-border-subtle">
             <p className="text-[13px] font-medium text-text-primary truncate">
@@ -193,7 +262,10 @@ export default function Sidebar({
           {(["available", "dnd"] as AgentStatus[]).map((s) => (
             <button
               key={s}
-              onClick={() => onAgentStatusChange(s)}
+              onClick={() => {
+                onAgentStatusChange(s);
+                setOpen(false);
+              }}
               className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] transition-colors ${
                 agentStatus === s
                   ? "bg-bg-elevated text-text-primary"
@@ -215,7 +287,10 @@ export default function Sidebar({
           {/* Logout */}
           <div className="border-t border-border-subtle">
             <button
-              onClick={logout}
+              onClick={() => {
+                setOpen(false);
+                logout();
+              }}
               className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] text-text-secondary hover:text-red hover:bg-red/5 transition-colors"
             >
               <LogOut size={14} />
@@ -223,33 +298,7 @@ export default function Sidebar({
             </button>
           </div>
         </div>
-      </div>
-
-      {/* Shortcuts */}
-      <ShortcutsButton onClick={onShowShortcuts} />
-
-      {/* Connection Quality */}
-      <ConnectionQuality level={qualityLevel} latency={latency} packetLoss={packetLoss} />
-
-      {/* Connection Status */}
-      <div className="group relative flex items-center justify-center w-10 h-10 mt-1">
-        <div
-          className={`w-2.5 h-2.5 rounded-full ${
-            connectionStatus === "connected"
-              ? "bg-green"
-              : connectionStatus === "connecting"
-              ? "bg-amber animate-pulse"
-              : "bg-red"
-          }`}
-        />
-        <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-bg-elevated border border-border-subtle rounded-lg text-[11px] text-text-secondary whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-          {connectionStatus === "connected"
-            ? "Connected to Telnyx"
-            : connectionStatus === "connecting"
-            ? "Connecting..."
-            : "Disconnected"}
-        </div>
-      </div>
-    </nav>
+      )}
+    </div>
   );
 }
