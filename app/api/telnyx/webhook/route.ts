@@ -9,45 +9,45 @@ function getAdmin() {
   );
 }
 
-// Match by phone_number + recent time window. This is the primary strategy
-// because WebRTC SDK and Telnyx webhooks use different call_control_ids.
-async function findRecentCall(phoneNumber: string) {
-  const admin = getAdmin();
-  const oneMinAgo = new Date(Date.now() - 60_000).toISOString();
-
-  // Try exact number
-  const { data } = await admin
-    .from("call_logs")
-    .select("id, call_control_id")
-    .eq("phone_number", phoneNumber)
-    .gte("created_at", oneMinAgo)
-    .order("created_at", { ascending: false })
-    .limit(1);
-
-  if (data && data.length > 0) return data[0];
-
-  // Try with/without + prefix
-  const alt = phoneNumber.startsWith("+")
-    ? phoneNumber.slice(1)
-    : `+${phoneNumber}`;
-
-  const { data: data2 } = await admin
-    .from("call_logs")
-    .select("id, call_control_id")
-    .eq("phone_number", alt)
-    .gte("created_at", oneMinAgo)
-    .order("created_at", { ascending: false })
-    .limit(1);
-
-  if (data2 && data2.length > 0) return data2[0];
-  return null;
+function cleanNumber(raw: string): string {
+  return raw.replace(/^sip:/, "").replace(/@.*$/, "");
 }
 
-function extractPhone(payload: Record<string, unknown>): string {
-  const dir = payload?.direction as string;
-  const raw = (dir === "outbound" ? payload?.to : payload?.from) as string || "";
-  // Strip SIP URI if present: sip:+14695551234@...
-  return raw.replace(/^sip:/, "").replace(/@.*$/, "");
+// Search by phone_number + recent time window.
+// Try both the "from" and "to" numbers since Telnyx direction
+// doesn't always match our perspective.
+async function findRecentCall(payload: Record<string, unknown>) {
+  const admin = getAdmin();
+  const oneMinAgo = new Date(Date.now() - 60_000).toISOString();
+  const from = cleanNumber((payload?.from as string) || "");
+  const to = cleanNumber((payload?.to as string) || "");
+
+  // Build all candidate numbers (with and without +)
+  const candidates = new Set<string>();
+  for (const num of [from, to]) {
+    if (!num) continue;
+    candidates.add(num);
+    if (num.startsWith("+")) candidates.add(num.slice(1));
+    else candidates.add(`+${num}`);
+  }
+
+  for (const phone of candidates) {
+    const { data } = await admin
+      .from("call_logs")
+      .select("id")
+      .eq("phone_number", phone)
+      .gte("created_at", oneMinAgo)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (data && data.length > 0) {
+      console.log(`[Webhook] Found row ${data[0].id} by phone=${phone}`);
+      return data[0];
+    }
+  }
+
+  console.log(`[Webhook] No row found for from=${from} to=${to}`);
+  return null;
 }
 
 async function updateRow(id: string, updates: Record<string, unknown>) {
@@ -57,7 +57,7 @@ async function updateRow(id: string, updates: Record<string, unknown>) {
     .update(updates)
     .eq("id", id);
   if (error) {
-    console.error(`[Webhook] Update failed for row ${id}:`, error.message);
+    console.error(`[Webhook] Update failed row ${id}:`, error.message);
   }
 }
 
@@ -66,25 +66,51 @@ export async function POST(req: NextRequest) {
   const eventType = body?.data?.event_type;
   const payload = body?.data?.payload || {};
   const ccid = payload?.call_control_id as string | undefined;
-  const phone = extractPhone(payload);
+  const sessionId = payload?.call_session_id as string | undefined;
+  const from = cleanNumber((payload?.from as string) || "");
+  const to = cleanNumber((payload?.to as string) || "");
 
-  console.log(`[Webhook] ${eventType} phone=${phone} ccid=${ccid}`);
+  console.log(`[Webhook] ${eventType} from=${from} to=${to} ccid=${ccid}`);
 
   const apiKey = process.env.TELNYX_API_KEY;
 
   switch (eventType) {
     case "call.initiated": {
-      // Link the webhook's ccid to the existing row (created by the client)
-      if (phone) {
-        const row = await findRecentCall(phone);
-        if (row) {
-          await updateRow(row.id, {
+      let row = await findRecentCall(payload);
+
+      if (row) {
+        // Row exists (client created it) — stamp webhook IDs
+        await updateRow(row.id, {
+          call_control_id: ccid,
+          call_session_id: sessionId,
+        });
+        console.log(`[Webhook] initiated — linked to row ${row.id}`);
+      } else {
+        // Row doesn't exist yet (webhook beat the client) — create it
+        // The prospect's number is "to" for outbound, "from" for inbound
+        const dir = payload?.direction as string;
+        const prospectNumber = dir === "outbound" ? to : from;
+        const fromNumber = dir === "outbound" ? from : to;
+
+        const admin = getAdmin();
+        const { data, error } = await admin
+          .from("call_logs")
+          .insert({
+            direction: dir === "outbound" ? "outbound" : "inbound",
+            phone_number: prospectNumber || to || from,
+            from_number: fromNumber,
+            status: "initiated",
             call_control_id: ccid,
-            call_session_id: payload?.call_session_id || null,
-          });
-          console.log(`[Webhook] Linked ccid to row ${row.id}`);
+            call_session_id: sessionId,
+          })
+          .select("id")
+          .single();
+
+        if (error) {
+          // user_id is required — insert without it if RLS allows, otherwise skip
+          console.log(`[Webhook] initiated — insert failed (expected, no user_id):`, error.message);
         } else {
-          console.log(`[Webhook] No recent row for ${phone} — client hasn't created it yet`);
+          console.log(`[Webhook] initiated — created row ${data.id}`);
         }
       }
       break;
@@ -112,19 +138,16 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Update status
-      if (phone) {
-        const row = await findRecentCall(phone);
-        if (row) {
-          await updateRow(row.id, {
-            status: "connected",
-            call_control_id: ccid,
-            call_session_id: payload?.call_session_id || null,
-          });
-          console.log(`[Webhook] ${eventType} → connected, row ${row.id}`);
-        } else {
-          console.warn(`[Webhook] ${eventType} no row found for ${phone}`);
-        }
+      const row = await findRecentCall(payload);
+      if (row) {
+        await updateRow(row.id, {
+          status: "connected",
+          call_control_id: ccid,
+          call_session_id: sessionId,
+        });
+        console.log(`[Webhook] ${eventType} → connected, row ${row.id}`);
+      } else {
+        console.warn(`[Webhook] ${eventType} — no row found`);
       }
       break;
     }
@@ -144,18 +167,16 @@ export async function POST(req: NextRequest) {
 
       console.log(`[Webhook] hangup duration=${duration}s`);
 
-      if (phone) {
-        const row = await findRecentCall(phone);
-        if (row) {
-          await updateRow(row.id, {
-            status: duration > 0 ? "completed" : "missed",
-            duration_seconds: duration,
-            call_control_id: ccid,
-          });
-          console.log(`[Webhook] hangup → ${duration > 0 ? "completed" : "missed"}, row ${row.id}`);
-        } else {
-          console.warn(`[Webhook] hangup no row found for ${phone}`);
-        }
+      const row = await findRecentCall(payload);
+      if (row) {
+        await updateRow(row.id, {
+          status: duration > 0 ? "completed" : "missed",
+          duration_seconds: duration,
+          call_control_id: ccid,
+        });
+        console.log(`[Webhook] hangup → ${duration > 0 ? "completed" : "missed"}, row ${row.id}`);
+      } else {
+        console.warn(`[Webhook] hangup — no row found`);
       }
       break;
     }
@@ -166,13 +187,13 @@ export async function POST(req: NextRequest) {
         (payload?.recording_urls as Record<string, string>)?.wav;
       console.log(`[Webhook] Recording: ${url}`);
 
-      if (url && phone) {
-        const row = await findRecentCall(phone);
+      if (url) {
+        const row = await findRecentCall(payload);
         if (row) {
           await updateRow(row.id, { recording_url: url });
           console.log(`[Webhook] recording saved, row ${row.id}`);
         } else {
-          console.warn(`[Webhook] recording.saved no row for ${phone}`);
+          console.warn(`[Webhook] recording.saved — no row found`);
         }
       }
       break;
