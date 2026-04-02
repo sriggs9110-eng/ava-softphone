@@ -17,6 +17,7 @@ interface CallHistoryPageProps {
   entries: CallHistoryEntry[];
   onDial: (number: string) => void;
   onUpdate: (entries: CallHistoryEntry[]) => void;
+  isManager?: boolean;
 }
 
 type FilterType = "all" | "inbound" | "outbound";
@@ -25,6 +26,7 @@ export default function CallHistoryPage({
   entries,
   onDial,
   onUpdate,
+  isManager,
 }: CallHistoryPageProps) {
   const [filter, setFilter] = useState<FilterType>("all");
   const [search, setSearch] = useState("");

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useTelnyxClient } from "@/app/hooks/useTelnyxClient";
+import { useAuth } from "@/lib/auth-context";
 import Sidebar, { NavPage } from "@/app/components/Sidebar";
 import DialPad from "@/app/components/DialPad";
 import ActiveCallUI from "@/app/components/ActiveCallUI";
@@ -15,6 +16,10 @@ import TranscriptsPage from "@/app/components/TranscriptsPage";
 import AfterCallWork from "@/app/components/AfterCallWork";
 import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
+import { Loader2 } from "lucide-react";
+import { insertCallLog, updateCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
+import { CallHistoryEntry } from "@/app/lib/types";
+import { useRouter } from "next/navigation";
 
 const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
   phone: { title: "Phone", subtitle: "Make or receive calls" },
@@ -25,12 +30,55 @@ const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
   settings: { title: "Settings", subtitle: "Configuration" },
 };
 
+// Convert Supabase call_log to legacy CallHistoryEntry for compatibility
+function callLogToEntry(log: CallLog): CallHistoryEntry {
+  const statusMap: Record<string, CallHistoryEntry["status"]> = {
+    completed: "completed",
+    missed: "missed",
+    declined: "rejected",
+    voicemail: "voicemail",
+    no_answer: "no-answer",
+    initiated: "completed",
+    ringing: "completed",
+    connected: "completed",
+  };
+
+  let parsedTranscript;
+  if (log.transcript) {
+    try {
+      parsedTranscript = JSON.parse(log.transcript);
+    } catch {
+      // If it's not JSON, leave as undefined
+    }
+  }
+
+  let parsedAnalysis;
+  if (log.ai_analysis) {
+    parsedAnalysis = log.ai_analysis as unknown as CallHistoryEntry["aiAnalysis"];
+  }
+
+  return {
+    id: log.id,
+    number: log.phone_number,
+    direction: log.direction,
+    duration: log.duration_seconds,
+    timestamp: new Date(log.created_at).getTime(),
+    status: statusMap[log.status] || "completed",
+    recordingUrl: log.recording_url || undefined,
+    aiAnalysis: parsedAnalysis,
+    transcript: parsedTranscript,
+  };
+}
+
 export default function Home() {
+  const { user, isManager, isAdmin, loading: authLoading, updateStatus } = useAuth();
+  const router = useRouter();
+
   const {
     connectionStatus,
     activeCall,
     inboundCall,
-    callHistory,
+    callHistory: localCallHistory,
     micError,
     transferCall,
     agentStatus,
@@ -52,13 +100,93 @@ export default function Home() {
     mergeConference,
     voicemailDrop,
     changeAgentStatus,
-    setCallHistory,
+    setCallHistory: setLocalCallHistory,
   } = useTelnyxClient();
 
   const [activePage, setActivePage] = useState<NavPage>("phone");
   const [showTransfer, setShowTransfer] = useState(false);
   const [showVmConfirm, setShowVmConfirm] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [supabaseEntries, setSupabaseEntries] = useState<CallHistoryEntry[]>([]);
+  const activeCallLogIdRef = useRef<string | null>(null);
+
+  // Load call history from Supabase
+  const loadCallLogs = useCallback(async () => {
+    if (!user) return;
+    const logs = await fetchCallLogs(isManager ? undefined : { userId: user.id });
+    setSupabaseEntries(logs.map(callLogToEntry));
+  }, [user, isManager]);
+
+  useEffect(() => {
+    loadCallLogs();
+  }, [loadCallLogs]);
+
+  // Sync agent status changes to Supabase
+  const handleAgentStatusChange = useCallback(
+    (status: typeof agentStatus) => {
+      changeAgentStatus(status);
+      // Map local status names to DB values
+      const dbStatus: Record<string, string> = {
+        available: "available",
+        "on-call": "on_call",
+        "after-call-work": "after_call_work",
+        dnd: "dnd",
+      };
+      updateStatus(dbStatus[status] || status);
+    },
+    [changeAgentStatus, updateStatus]
+  );
+
+  // Create call log in Supabase when making/receiving a call
+  const handleMakeCall = useCallback(
+    async (number: string) => {
+      makeCall(number);
+      if (user) {
+        const log = await insertCallLog({
+          user_id: user.id,
+          direction: "outbound",
+          phone_number: number,
+          status: "initiated",
+        });
+        if (log) activeCallLogIdRef.current = log.id;
+      }
+    },
+    [makeCall, user]
+  );
+
+  const handleAnswerCall = useCallback(async () => {
+    const callerNumber = inboundCall?.options?.callerNumber || "Unknown";
+    answerCall();
+    if (user) {
+      const log = await insertCallLog({
+        user_id: user.id,
+        direction: "inbound",
+        phone_number: callerNumber,
+        status: "connected",
+      });
+      if (log) activeCallLogIdRef.current = log.id;
+    }
+  }, [answerCall, inboundCall, user]);
+
+  const handleHangup = useCallback(async () => {
+    // Update call log before hanging up
+    if (activeCallLogIdRef.current && activeCall) {
+      const duration = activeCall.startTime
+        ? Math.floor((Date.now() - activeCall.startTime) / 1000)
+        : 0;
+      await updateCallLog(activeCallLogIdRef.current, {
+        status: duration > 0 ? "completed" : "missed",
+        duration_seconds: duration,
+      });
+      activeCallLogIdRef.current = null;
+      // Reload call logs after call ends
+      setTimeout(loadCallLogs, 500);
+    }
+    hangup();
+  }, [hangup, activeCall, loadCallLogs]);
+
+  // Combine Supabase entries with any live local entries not yet in Supabase
+  const callHistory = supabaseEntries.length > 0 ? supabaseEntries : localCallHistory;
 
   const recentNumbers = useMemo(
     () => [...new Set(callHistory.map((e) => e.number))],
@@ -90,8 +218,8 @@ export default function Home() {
   }, [voicemailDrop]);
 
   const handleAcwReady = useCallback(() => {
-    changeAgentStatus("available");
-  }, [changeAgentStatus]);
+    handleAgentStatusChange("available");
+  }, [handleAgentStatusChange]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -102,14 +230,12 @@ export default function Home() {
         target.tagName === "TEXTAREA" ||
         target.isContentEditable;
 
-      // ? always toggles shortcuts
       if (e.key === "?" && !isInput) {
         e.preventDefault();
         setShowShortcuts((prev) => !prev);
         return;
       }
 
-      // Don't intercept when typing in inputs (except Escape/Enter for call actions)
       if (isInput && e.key !== "Escape" && e.key !== "Enter") return;
 
       if (e.key === "Escape") {
@@ -119,16 +245,12 @@ export default function Home() {
         }
         if (activeCall) {
           e.preventDefault();
-          hangup();
+          handleHangup();
         }
         return;
       }
 
-      if (e.key === "Enter" && !activeCall && activePage === "phone") {
-        // Enter handled by DialPad's own input
-        return;
-      }
-
+      if (e.key === "Enter" && !activeCall && activePage === "phone") return;
       if (!activeCall) return;
 
       if (e.key === "m" || e.key === "M") {
@@ -142,9 +264,17 @@ export default function Home() {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeCall, hangup, toggleMute, toggleHold, activePage, showShortcuts]);
+  }, [activeCall, handleHangup, toggleMute, toggleHold, activePage, showShortcuts]);
 
-  // Page title override
+  // Auth loading state
+  if (authLoading) {
+    return (
+      <div className="flex w-full min-h-screen bg-bg-app items-center justify-center">
+        <Loader2 size={24} className="animate-spin text-text-tertiary" />
+      </div>
+    );
+  }
+
   const pageInfo =
     activePage === "phone" && activeCall
       ? { title: "Active Call", subtitle: "In progress" }
@@ -158,10 +288,16 @@ export default function Home() {
 
       <Sidebar
         activePage={activePage}
-        onNavigate={setActivePage}
+        onNavigate={(page) => {
+          if (page === "settings" && isAdmin) {
+            router.push("/settings/users");
+            return;
+          }
+          setActivePage(page);
+        }}
         connectionStatus={connectionStatus}
         agentStatus={agentStatus}
-        onAgentStatusChange={changeAgentStatus}
+        onAgentStatusChange={handleAgentStatusChange}
         acwCountdown={acwCountdown}
         qualityLevel={qualityLevel}
         latency={latency}
@@ -173,7 +309,7 @@ export default function Home() {
       {inboundCall && !activeCall && (
         <InboundCallUI
           callerNumber={inboundCall.options.callerNumber || "Unknown"}
-          onAccept={answerCall}
+          onAccept={handleAnswerCall}
           onReject={rejectCall}
         />
       )}
@@ -244,7 +380,7 @@ export default function Home() {
               {activeCall ? (
                 <ActiveCallUI
                   call={activeCall}
-                  onHangup={hangup}
+                  onHangup={handleHangup}
                   onToggleMute={toggleMute}
                   onToggleHold={toggleHold}
                   onDTMF={sendDTMF}
@@ -259,7 +395,7 @@ export default function Home() {
               ) : (
                 <div className="flex flex-col items-center gap-8">
                   <DialPad
-                    onCall={makeCall}
+                    onCall={handleMakeCall}
                     recentNumbers={recentNumbers}
                     disabled={connectionStatus !== "connected" || agentStatus === "dnd"}
                   />
@@ -267,7 +403,7 @@ export default function Home() {
                     <div className="w-full max-w-md border-t border-border-subtle pt-6">
                       <CallHistory
                         entries={callHistory.slice(0, 5)}
-                        onDial={makeCall}
+                        onDial={handleMakeCall}
                       />
                     </div>
                   )}
@@ -282,25 +418,28 @@ export default function Home() {
               entries={callHistory}
               onDial={(num) => {
                 setActivePage("phone");
-                makeCall(num);
+                handleMakeCall(num);
               }}
-              onUpdate={setCallHistory}
+              onUpdate={(entries) => setSupabaseEntries(entries)}
+              isManager={isManager}
             />
           )}
 
           {/* Monitor Page */}
-          {activePage === "monitor" && <MonitorPage />}
+          {activePage === "monitor" && isManager && <MonitorPage />}
 
           {/* Reports Page */}
-          {activePage === "reports" && <ReportsPage entries={callHistory} />}
+          {activePage === "reports" && isManager && (
+            <ReportsPage entries={callHistory} />
+          )}
 
           {/* Transcripts Page */}
-          {activePage === "transcripts" && (
+          {activePage === "transcripts" && isManager && (
             <TranscriptsPage entries={callHistory} />
           )}
 
           {/* Settings Page */}
-          {activePage === "settings" && (
+          {activePage === "settings" && isAdmin && (
             <div className="max-w-lg space-y-4">
               <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
                 <h3 className="text-sm font-semibold text-text-primary mb-1">
@@ -323,37 +462,22 @@ export default function Home() {
               </div>
               <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
                 <h3 className="text-sm font-semibold text-text-primary mb-1">
+                  User Management
+                </h3>
+                <button
+                  onClick={() => router.push("/settings/users")}
+                  className="mt-2 text-[13px] text-accent hover:underline"
+                >
+                  Manage users &rarr;
+                </button>
+              </div>
+              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-text-primary mb-1">
                   Outbound Number
                 </h3>
                 <p className="text-[14px] text-text-secondary tabular-nums mt-1">
                   {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not configured"}
                 </p>
-              </div>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-text-primary mb-1">
-                  Agent Status
-                </h3>
-                <div className="flex items-center gap-2 mt-2">
-                  <div
-                    className={`w-2 h-2 rounded-full ${
-                      agentStatus === "available"
-                        ? "bg-green"
-                        : agentStatus === "on-call"
-                        ? "bg-amber"
-                        : agentStatus === "dnd"
-                        ? "bg-red"
-                        : "bg-text-tertiary"
-                    }`}
-                  />
-                  <p className="text-[14px] text-text-secondary capitalize">
-                    {agentStatus.replace(/-/g, " ")}
-                  </p>
-                  {acwCountdown !== null && (
-                    <span className="text-[12px] text-amber ml-2">
-                      ({acwCountdown}s)
-                    </span>
-                  )}
-                </div>
               </div>
               <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
                 <h3 className="text-sm font-semibold text-text-primary mb-1">
@@ -371,7 +495,7 @@ export default function Home() {
                   Version
                 </h3>
                 <p className="text-[12px] text-text-tertiary mt-1">
-                  Ava Softphone v0.3.0
+                  Ava Softphone v0.4.0
                 </p>
               </div>
             </div>
