@@ -435,6 +435,9 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
 
       callRef.current = call;
       const ccid = call.telnyxIDs?.telnyxCallControlId || undefined;
+      const csid = call.telnyxIDs?.telnyxSessionId || undefined;
+      const clegid = call.telnyxIDs?.telnyxLegId || undefined;
+      console.log("[SDK] newCall IDs — ccid:", ccid, "sessionId:", csid, "legId:", clegid, "allIDs:", JSON.stringify(call.telnyxIDs));
 
       setAgentStatus("on-call");
       setActiveCall({
