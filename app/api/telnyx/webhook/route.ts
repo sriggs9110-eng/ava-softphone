@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-// Use service role to bypass RLS — webhooks have no user session
 function getAdmin() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -10,31 +9,53 @@ function getAdmin() {
   );
 }
 
+async function updateByCallControlId(
+  callControlId: string,
+  updates: Record<string, unknown>
+) {
+  const admin = getAdmin();
+  const { data, error } = await admin
+    .from("call_logs")
+    .update(updates)
+    .eq("call_control_id", callControlId)
+    .select("id");
+
+  if (error) {
+    console.error(`[Webhook] DB update failed for ${callControlId}:`, error);
+  } else {
+    console.log(
+      `[Webhook] Updated ${data?.length || 0} rows for ${callControlId}:`,
+      Object.keys(updates).join(", ")
+    );
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
 
   const eventType = body?.data?.event_type;
   const payload = body?.data?.payload;
+  const callControlId = payload?.call_control_id;
 
-  console.log(`[Telnyx Webhook] ${eventType}`, JSON.stringify(payload, null, 2));
+  console.log(`[Webhook] ${eventType} ccid=${callControlId}`);
 
   const apiKey = process.env.TELNYX_API_KEY;
-  const callControlId = payload?.call_control_id;
 
   switch (eventType) {
     case "call.initiated":
       console.log(
-        `Call initiated: ${payload?.direction} - ${payload?.from} -> ${payload?.to}`
+        `[Webhook] ${payload?.direction} ${payload?.from} -> ${payload?.to}`
       );
       break;
 
     case "call.answered":
-      console.log(`Call answered: ${callControlId}`);
+    case "call.bridged": {
+      console.log(`[Webhook] Call connected: ${callControlId}`);
 
-      // Start recording via Call Control API
+      // Start recording
       if (apiKey && callControlId) {
         try {
-          const recordRes = await fetch(
+          const res = await fetch(
             `https://api.telnyx.com/v2/calls/${callControlId}/actions/record_start`,
             {
               method: "POST",
@@ -48,56 +69,71 @@ export async function POST(req: NextRequest) {
               }),
             }
           );
-          const recordData = await recordRes.json();
-          console.log(
-            `[Telnyx Webhook] record_start response:`,
-            recordRes.status,
-            JSON.stringify(recordData)
-          );
+          console.log(`[Webhook] record_start: ${res.status}`);
         } catch (err) {
-          console.error("[Telnyx Webhook] Failed to start recording:", err);
+          console.error("[Webhook] record_start failed:", err);
         }
       }
 
-      // Update call_logs status to connected
+      // Mark call as connected with the answer timestamp
       if (callControlId) {
-        const admin = getAdmin();
-        await admin
-          .from("call_logs")
-          .update({ status: "connected" })
-          .eq("call_control_id", callControlId);
+        await updateByCallControlId(callControlId, {
+          status: "connected",
+        });
       }
       break;
+    }
 
-    case "call.hangup":
+    case "call.hangup": {
       console.log(
-        `Call hangup: ${callControlId} - reason: ${payload?.hangup_cause}`
+        `[Webhook] Hangup: ${callControlId} cause=${payload?.hangup_cause}`
       );
+
+      if (callControlId) {
+        // Calculate duration from Telnyx timestamps
+        let durationSeconds = 0;
+        const startTime = payload?.start_time;
+        const endTime = payload?.end_time;
+
+        if (startTime && endTime) {
+          durationSeconds = Math.floor(
+            (new Date(endTime).getTime() - new Date(startTime).getTime()) / 1000
+          );
+        }
+
+        // Telnyx may also provide duration directly
+        if (!durationSeconds && payload?.duration_seconds) {
+          durationSeconds = Math.floor(payload.duration_seconds);
+        }
+
+        const wasConnected = durationSeconds > 0;
+        console.log(
+          `[Webhook] Duration: ${durationSeconds}s, status: ${wasConnected ? "completed" : "missed"}`
+        );
+
+        await updateByCallControlId(callControlId, {
+          status: wasConnected ? "completed" : "missed",
+          duration_seconds: durationSeconds,
+        });
+      }
       break;
+    }
 
     case "call.recording.saved": {
       const recordingUrl =
         payload?.recording_urls?.mp3 || payload?.recording_urls?.wav;
-      console.log(`Recording saved: ${recordingUrl} for ${callControlId}`);
+      console.log(`[Webhook] Recording saved: ${recordingUrl}`);
 
       if (recordingUrl && callControlId) {
-        const admin = getAdmin();
-        const { error } = await admin
-          .from("call_logs")
-          .update({ recording_url: recordingUrl })
-          .eq("call_control_id", callControlId);
-
-        if (error) {
-          console.error("[Telnyx Webhook] Failed to save recording URL:", error);
-        } else {
-          console.log("[Telnyx Webhook] Recording URL saved to call_logs");
-        }
+        await updateByCallControlId(callControlId, {
+          recording_url: recordingUrl,
+        });
       }
       break;
     }
 
     default:
-      console.log(`Unhandled event: ${eventType}`);
+      console.log(`[Webhook] Unhandled: ${eventType}`);
   }
 
   return NextResponse.json({ status: "ok" });

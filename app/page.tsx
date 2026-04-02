@@ -38,8 +38,8 @@ function callLogToEntry(log: CallLog): CallHistoryEntry {
     declined: "rejected",
     voicemail: "voicemail",
     no_answer: "no-answer",
-    initiated: "completed",
-    ringing: "completed",
+    initiated: "missed",
+    ringing: "missed",
     connected: "completed",
   };
 
@@ -122,16 +122,11 @@ export default function Home() {
   }, [loadCallLogs]);
 
   // Called by the Telnyx hook on ANY call end (user hangup or remote hangup)
-  function handleCallEnd(info: CallEndInfo) {
-    if (activeCallLogIdRef.current) {
-      updateCallLog(activeCallLogIdRef.current, {
-        status: info.status === "completed" ? "completed" : "missed",
-        duration_seconds: info.duration,
-      }).then(() => {
-        activeCallLogIdRef.current = null;
-        setTimeout(loadCallLogs, 500);
-      });
-    }
+  // The webhook handles status + duration authoritatively — client just reloads
+  function handleCallEnd(_info: CallEndInfo) {
+    activeCallLogIdRef.current = null;
+    // Give webhook time to process before reloading
+    setTimeout(loadCallLogs, 2000);
   }
 
   // Sync agent status changes to Supabase
