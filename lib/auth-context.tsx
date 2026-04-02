@@ -50,20 +50,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const fetchUser = useCallback(async () => {
     const {
-      data: { session },
-    } = await supabase.auth.getSession();
+      data: { user: authUser },
+    } = await supabase.auth.getUser();
 
-    if (!session?.user) {
+    if (!authUser) {
       setUser(null);
       setLoading(false);
       return;
     }
 
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("softphone_users")
-      .select("*")
-      .eq("id", session.user.id)
+      .select("id, email, full_name, role, extension, status")
+      .eq("id", authUser.id)
       .single();
+
+    if (error) {
+      console.error("[AuthContext] Failed to fetch softphone_users row:", error);
+    }
 
     if (data) {
       setUser(data as SoftphoneUser);
