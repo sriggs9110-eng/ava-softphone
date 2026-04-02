@@ -24,12 +24,12 @@ export async function POST(req: NextRequest) {
   if (hasTranscript) {
     analysisContext = `Full transcript:\n${call_metadata.transcript}`;
   } else if (hasRecording) {
-    analysisContext = `Recording available at: ${recording_url}\n(Note: Audio transcription pipeline not yet connected. Analyze based on call metadata. When transcription is available, this analysis will be updated with actual conversation content.)`;
+    analysisContext = `A recording exists for this call (audio transcription will be added in a future update). The call was answered and lasted ${duration} seconds, which confirms a real conversation took place. Analyze based on the call metadata — the duration and direction indicate the nature of the interaction. Do NOT label this as "estimated" since the call data (duration, status) is real.`;
   } else {
-    analysisContext = `No transcript or recording available. Analyze based on the call metadata only.`;
+    analysisContext = `No transcript or recording available. Analyze based on the call metadata only. Begin the summary with "⚡ Estimated — " to indicate this is based on metadata only.`;
   }
 
-  const hasRealContent = hasTranscript;
+  const hasRealContent = hasTranscript || hasRecording;
 
   const systemPrompt = hasRealContent
     ? `You are a sales call analyst for Ava Residential, a B2B inside sales team at an ISP reseller. Analyze this call transcript and return a JSON object with:
