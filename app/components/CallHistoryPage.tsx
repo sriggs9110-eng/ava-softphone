@@ -140,11 +140,19 @@ export default function CallHistoryPage({
           {filtered.map((entry) => (
             <div key={entry.id}>
               {/* Row */}
-              <button
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() =>
                   setExpandedId(expandedId === entry.id ? null : entry.id)
                 }
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-bg-elevated rounded-xl transition-all duration-150 group"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setExpandedId(expandedId === entry.id ? null : entry.id);
+                  }
+                }}
+                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-bg-elevated rounded-xl transition-all duration-150 group cursor-pointer"
               >
                 {/* Direction */}
                 <div
@@ -225,7 +233,7 @@ export default function CallHistoryPage({
                     AI
                   </button>
                 )}
-              </button>
+              </div>
 
               {/* Expanded Details */}
               {expandedId === entry.id && (
