@@ -9,6 +9,8 @@ import {
   Search,
   TrendingUp,
   Loader2,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { CallHistoryEntry, AIAnalysis } from "@/app/lib/types";
 import { updateCallLog } from "@/lib/call-logs";
@@ -43,7 +45,7 @@ export default function CallHistoryPage({
 
   const handleAnalyze = useCallback(
     async (entry: CallHistoryEntry) => {
-      console.log("[AI Analyze] Starting analysis for:", entry.id, entry.number);
+      console.log("[AI Analyze] Starting for:", entry.id);
       setAnalyzingId(entry.id);
       try {
         const res = await fetch("/api/ai/analyze-call", {
@@ -64,23 +66,25 @@ export default function CallHistoryPage({
           }),
         });
 
+        console.log("[AI Analyze] Response status:", res.status);
+
         if (res.ok) {
           const analysis: AIAnalysis = await res.json();
+          console.log("[AI Analyze] Got analysis:", analysis.score);
 
-          // Save to Supabase
           await updateCallLog(entry.id, {
             ai_analysis: analysis as unknown as Record<string, unknown>,
             ai_summary: analysis.summary,
             ai_score: analysis.score,
           });
 
-          // Update local state
           const updated = entries.map((e) =>
             e.id === entry.id ? { ...e, aiAnalysis: analysis } : e
           );
           onUpdate(updated);
+          setExpandedId(entry.id);
         } else {
-          console.error("[AI Analyze] API returned", res.status, await res.text());
+          console.error("[AI Analyze] Failed:", res.status, await res.text());
         }
       } catch (err) {
         console.error("[AI Analyze] Error:", err);
@@ -95,6 +99,10 @@ export default function CallHistoryPage({
     if (score >= 7) return "bg-green/15 text-green border-green/30";
     if (score >= 4) return "bg-amber/15 text-amber border-amber/30";
     return "bg-red/15 text-red border-red/30";
+  };
+
+  const toggleExpand = (id: string) => {
+    setExpandedId(expandedId === id ? null : id);
   };
 
   return (
@@ -138,169 +146,166 @@ export default function CallHistoryPage({
         </div>
       ) : (
         <div className="space-y-1">
-          {filtered.map((entry) => (
-            <div key={entry.id}>
-              {/* Row */}
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={() => {
-                  console.log("[History] Row clicked, entry.id:", entry.id, "expandedId:", expandedId);
-                  setExpandedId(expandedId === entry.id ? null : entry.id);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setExpandedId(expandedId === entry.id ? null : entry.id);
-                  }
-                }}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-bg-elevated rounded-xl transition-all duration-150 group cursor-pointer"
-              >
-                {/* Direction */}
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                    entry.direction === "inbound"
-                      ? "bg-green/10 text-green"
-                      : "bg-accent/10 text-accent"
-                  }`}
-                >
-                  {entry.direction === "inbound" ? (
-                    <PhoneIncoming size={14} />
-                  ) : (
-                    <PhoneOutgoing size={14} />
-                  )}
-                </div>
+          {filtered.map((entry) => {
+            const isExpanded = expandedId === entry.id;
 
-                {/* Number */}
-                <div className="flex-1 text-left min-w-0">
-                  <p className="text-[14px] font-medium text-text-primary group-hover:text-accent transition-colors truncate">
-                    {entry.number}
-                  </p>
-                  <p className="text-[12px] text-text-tertiary mt-0.5">
-                    {formatTimestamp(entry.timestamp)}
-                  </p>
-                </div>
-
-                {/* Duration */}
-                <span className="text-[12px] text-text-tertiary tabular-nums shrink-0">
-                  {formatCallDuration(entry.duration)}
-                </span>
-
-                {/* Status */}
-                <StatusBadge status={entry.status} />
-
-                {/* Recording */}
-                {entry.recordingUrl && (
+            return (
+              <div key={entry.id} className="rounded-xl overflow-hidden">
+                {/* Row — NOT a button, just a flex container with separate click zones */}
+                <div className="flex items-center gap-3 px-4 py-3 hover:bg-bg-elevated transition-all duration-150 group">
+                  {/* Expand toggle */}
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setPlayingId(playingId === entry.id ? null : entry.id);
-                    }}
-                    className="w-7 h-7 rounded-full bg-bg-elevated hover:bg-bg-hover flex items-center justify-center text-text-secondary transition-colors"
+                    onClick={() => toggleExpand(entry.id)}
+                    className="w-5 h-5 flex items-center justify-center text-text-tertiary hover:text-text-secondary shrink-0"
                   >
-                    {playingId === entry.id ? (
-                      <Pause size={12} />
+                    {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  </button>
+
+                  {/* Direction icon — clickable to expand */}
+                  <button
+                    onClick={() => toggleExpand(entry.id)}
+                    className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                      entry.direction === "inbound"
+                        ? "bg-green/10 text-green"
+                        : "bg-accent/10 text-accent"
+                    }`}
+                  >
+                    {entry.direction === "inbound" ? (
+                      <PhoneIncoming size={14} />
                     ) : (
-                      <Play size={12} />
+                      <PhoneOutgoing size={14} />
                     )}
                   </button>
-                )}
 
-                {/* AI Score */}
-                {entry.aiAnalysis && (
-                  <div
-                    className={`px-2 py-0.5 rounded-full border text-[11px] font-semibold ${scoreColor(
-                      entry.aiAnalysis.score
-                    )}`}
-                  >
-                    {entry.aiAnalysis.score}/10
-                  </div>
-                )}
-
-                {/* Analyze button */}
-                {!entry.aiAnalysis && (
+                  {/* Number + time — clickable to expand */}
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      console.log("[History] AI button clicked, entry.id:", entry.id);
-                      handleAnalyze(entry);
-                    }}
-                    disabled={analyzingId === entry.id}
-                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-tertiary hover:text-accent text-[11px] font-medium transition-colors disabled:opacity-50"
+                    onClick={() => toggleExpand(entry.id)}
+                    className="flex-1 text-left min-w-0"
                   >
-                    {analyzingId === entry.id ? (
-                      <Loader2 size={12} className="animate-spin" />
-                    ) : (
-                      <TrendingUp size={12} />
-                    )}
-                    AI
+                    <p className="text-[14px] font-medium text-text-primary group-hover:text-accent transition-colors truncate">
+                      {entry.number}
+                    </p>
+                    <p className="text-[12px] text-text-tertiary mt-0.5">
+                      {formatTimestamp(entry.timestamp)}
+                    </p>
                   </button>
-                )}
-              </div>
 
-              {/* Expanded Details */}
-              {expandedId === entry.id && (
-                <div className="ml-11 mr-4 mb-3 p-4 bg-bg-surface border border-border-subtle rounded-xl animate-fade-in space-y-4">
-                  {/* Recording player placeholder */}
+                  {/* Duration */}
+                  <span className="text-[12px] text-text-tertiary tabular-nums shrink-0">
+                    {formatCallDuration(entry.duration)}
+                  </span>
+
+                  {/* Status */}
+                  <StatusBadge status={entry.status} />
+
+                  {/* Recording */}
                   {entry.recordingUrl && (
-                    <div className="flex items-center gap-3 p-3 bg-bg-elevated rounded-lg">
-                      <button
-                        onClick={() =>
-                          setPlayingId(
-                            playingId === entry.id ? null : entry.id
-                          )
-                        }
-                        className="w-8 h-8 rounded-full bg-accent flex items-center justify-center text-white shrink-0"
-                      >
-                        {playingId === entry.id ? (
-                          <Pause size={14} />
-                        ) : (
-                          <Play size={14} />
-                        )}
-                      </button>
-                      <div className="flex-1 h-1.5 bg-border rounded-full overflow-hidden">
-                        <div className="h-full w-0 bg-accent rounded-full" />
-                      </div>
-                      <span className="text-[11px] text-text-tertiary tabular-nums">
-                        {formatCallDuration(entry.duration)}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* AI Analysis */}
-                  {entry.aiAnalysis ? (
-                    <AIAnalysisView analysis={entry.aiAnalysis} />
-                  ) : (
                     <button
-                      onClick={() => handleAnalyze(entry)}
-                      disabled={analyzingId === entry.id}
-                      className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
+                      onClick={() =>
+                        setPlayingId(playingId === entry.id ? null : entry.id)
+                      }
+                      className="w-7 h-7 rounded-full bg-bg-elevated hover:bg-bg-hover flex items-center justify-center text-text-secondary transition-colors"
                     >
-                      {analyzingId === entry.id ? (
-                        <>
-                          <Loader2 size={16} className="animate-spin" />
-                          Analyzing...
-                        </>
+                      {playingId === entry.id ? (
+                        <Pause size={12} />
                       ) : (
-                        <>
-                          <TrendingUp size={16} />
-                          Analyze with AI
-                        </>
+                        <Play size={12} />
                       )}
                     </button>
                   )}
 
-                  {/* Dial button */}
-                  <button
-                    onClick={() => onDial(entry.number)}
-                    className="w-full py-2.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-medium transition-colors min-h-[44px]"
-                  >
-                    Call {entry.number}
-                  </button>
+                  {/* AI Score */}
+                  {entry.aiAnalysis && (
+                    <div
+                      className={`px-2 py-0.5 rounded-full border text-[11px] font-semibold ${scoreColor(
+                        entry.aiAnalysis.score
+                      )}`}
+                    >
+                      {entry.aiAnalysis.score}/10
+                    </div>
+                  )}
+
+                  {/* Analyze button — completely separate, no parent button */}
+                  {!entry.aiAnalysis && (
+                    <button
+                      onClick={() => handleAnalyze(entry)}
+                      disabled={analyzingId === entry.id}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-tertiary hover:text-accent text-[11px] font-medium transition-colors disabled:opacity-50"
+                    >
+                      {analyzingId === entry.id ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : (
+                        <TrendingUp size={12} />
+                      )}
+                      AI
+                    </button>
+                  )}
                 </div>
-              )}
-            </div>
-          ))}
+
+                {/* Expanded Details */}
+                {isExpanded && (
+                  <div className="ml-14 mr-4 mb-3 p-4 bg-bg-surface border border-border-subtle rounded-xl animate-fade-in space-y-4">
+                    {/* Recording player placeholder */}
+                    {entry.recordingUrl && (
+                      <div className="flex items-center gap-3 p-3 bg-bg-elevated rounded-lg">
+                        <button
+                          onClick={() =>
+                            setPlayingId(
+                              playingId === entry.id ? null : entry.id
+                            )
+                          }
+                          className="w-8 h-8 rounded-full bg-accent flex items-center justify-center text-white shrink-0"
+                        >
+                          {playingId === entry.id ? (
+                            <Pause size={14} />
+                          ) : (
+                            <Play size={14} />
+                          )}
+                        </button>
+                        <div className="flex-1 h-1.5 bg-border rounded-full overflow-hidden">
+                          <div className="h-full w-0 bg-accent rounded-full" />
+                        </div>
+                        <span className="text-[11px] text-text-tertiary tabular-nums">
+                          {formatCallDuration(entry.duration)}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* AI Analysis */}
+                    {entry.aiAnalysis ? (
+                      <AIAnalysisView analysis={entry.aiAnalysis} />
+                    ) : (
+                      <button
+                        onClick={() => handleAnalyze(entry)}
+                        disabled={analyzingId === entry.id}
+                        className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
+                      >
+                        {analyzingId === entry.id ? (
+                          <>
+                            <Loader2 size={16} className="animate-spin" />
+                            Analyzing...
+                          </>
+                        ) : (
+                          <>
+                            <TrendingUp size={16} />
+                            Analyze with AI
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    {/* Dial button */}
+                    <button
+                      onClick={() => onDial(entry.number)}
+                      className="w-full py-2.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-medium transition-colors min-h-[44px]"
+                    >
+                      Call {entry.number}
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
