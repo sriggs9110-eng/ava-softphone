@@ -46,6 +46,7 @@ export interface ActiveCallInfo {
   startTime: number | null;
   isMuted: boolean;
   isHeld: boolean;
+  callControlId?: string;
 }
 
 export interface AgentInfo {

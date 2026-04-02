@@ -58,6 +58,7 @@ export async function updateCallLog(
       | "status"
       | "duration_seconds"
       | "recording_url"
+      | "call_control_id"
       | "transcript"
       | "ai_summary"
       | "ai_score"

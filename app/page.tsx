@@ -184,6 +184,16 @@ export default function Home() {
     hangup();
   }, [hangup]);
 
+  // When call becomes active, save call_control_id to the Supabase row
+  useEffect(() => {
+    if (activeCall?.callControlId && activeCallLogIdRef.current) {
+      updateCallLog(activeCallLogIdRef.current, {
+        status: "connected",
+        call_control_id: activeCall.callControlId,
+      });
+    }
+  }, [activeCall?.callControlId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Combine Supabase entries with any live local entries not yet in Supabase
   const callHistory = supabaseEntries.length > 0 ? supabaseEntries : localCallHistory;
 

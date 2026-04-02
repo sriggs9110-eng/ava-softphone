@@ -302,6 +302,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
                 startTime: Date.now(),
                 isMuted: false,
                 isHeld: false,
+                callControlId: call.telnyxIDs?.telnyxCallControlId || undefined,
               });
             }
 
