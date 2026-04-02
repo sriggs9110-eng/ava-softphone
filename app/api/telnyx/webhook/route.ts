@@ -195,22 +195,60 @@ export async function POST(req: NextRequest) {
     case "call.recording.saved": {
       const urls = payload?.recording_urls as Record<string, string> | undefined;
       const url = urls?.mp3 || urls?.wav;
-      console.log(`[Webhook] Recording url=${url} ccid=${ccid} from=${from} to=${to}`);
+      const recSessionId = payload?.call_session_id as string | undefined;
+      console.log(`[Webhook] Recording url=${url} ccid=${ccid} session=${recSessionId} from=${from} to=${to}`);
 
       if (url) {
-        // Try call_control_id first (stamped by earlier events)
-        let row = ccid ? await findByCallControlId(ccid) : null;
+        const admin = getAdmin();
+        let rowId: string | null = null;
 
-        // Fallback: phone match with 5 minute window (recordings arrive late)
-        if (!row) {
-          row = await findRecentCall(payload, 5);
+        // Strategy 1: call_control_id match
+        if (!rowId && ccid) {
+          const r = await findByCallControlId(ccid);
+          if (r) rowId = r.id;
         }
 
-        if (row) {
-          await updateRow(row.id, { recording_url: url });
-          console.log(`[Webhook] recording saved, row ${row.id}`);
+        // Strategy 2: call_session_id match
+        if (!rowId && recSessionId) {
+          const { data } = await admin
+            .from("call_logs")
+            .select("id")
+            .eq("call_session_id", recSessionId)
+            .limit(1);
+          if (data && data.length > 0) {
+            rowId = data[0].id;
+            console.log(`[Webhook] Recording matched by session_id, row ${rowId}`);
+          }
+        }
+
+        // Strategy 3: phone match with 5 min window
+        if (!rowId) {
+          const r = await findRecentCall(payload, 5);
+          if (r) rowId = r.id;
+        }
+
+        // Strategy 4: most recent completed call in 5 min (last resort)
+        if (!rowId) {
+          const fiveMinAgo = new Date(Date.now() - 300_000).toISOString();
+          const { data } = await admin
+            .from("call_logs")
+            .select("id")
+            .in("status", ["completed", "connected"])
+            .is("recording_url", null)
+            .gte("created_at", fiveMinAgo)
+            .order("created_at", { ascending: false })
+            .limit(1);
+          if (data && data.length > 0) {
+            rowId = data[0].id;
+            console.log(`[Webhook] Recording matched by recent completed call, row ${rowId}`);
+          }
+        }
+
+        if (rowId) {
+          await updateRow(rowId, { recording_url: url });
+          console.log(`[Webhook] recording saved to row ${rowId}`);
         } else {
-          console.warn(`[Webhook] recording.saved — no row found`);
+          console.warn(`[Webhook] recording.saved — NO ROW FOUND for url=${url}`);
         }
       }
       break;

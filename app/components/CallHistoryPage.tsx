@@ -43,7 +43,7 @@ export default function CallHistoryPage({
 
   const handleAnalyze = useCallback(
     async (entry: CallHistoryEntry) => {
-      console.log("[AI Analyze] Starting for:", entry.id);
+      console.log("[AI Analyze] Starting for:", entry.id, "recordingUrl:", entry.recordingUrl);
       setAnalyzingId(entry.id);
       try {
         const res = await fetch("/api/ai/analyze-call", {
@@ -51,6 +51,7 @@ export default function CallHistoryPage({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             recording_url: entry.recordingUrl,
+            call_log_id: entry.id,
             call_metadata: {
               number: entry.number,
               direction: entry.direction,
@@ -258,23 +259,30 @@ export default function CallHistoryPage({
                     {entry.aiAnalysis ? (
                       <AIAnalysisView analysis={entry.aiAnalysis} />
                     ) : (
-                      <button
-                        onClick={() => handleAnalyze(entry)}
-                        disabled={analyzingId === entry.id}
-                        className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
-                      >
-                        {analyzingId === entry.id ? (
-                          <>
-                            <Loader2 size={16} className="animate-spin" />
-                            Analyzing...
-                          </>
-                        ) : (
-                          <>
-                            <TrendingUp size={16} />
-                            Analyze with AI
-                          </>
+                      <div className="space-y-2">
+                        {!entry.recordingUrl && entry.status === "completed" && (
+                          <p className="text-[12px] text-amber px-1">
+                            Recording not available yet. It may take up to 60 seconds after the call ends.
+                          </p>
                         )}
-                      </button>
+                        <button
+                          onClick={() => handleAnalyze(entry)}
+                          disabled={analyzingId === entry.id}
+                          className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
+                        >
+                          {analyzingId === entry.id ? (
+                            <>
+                              <Loader2 size={16} className="animate-spin" />
+                              {entry.recordingUrl ? "Transcribing & Analyzing..." : "Analyzing..."}
+                            </>
+                          ) : (
+                            <>
+                              <TrendingUp size={16} />
+                              {entry.recordingUrl ? "Transcribe & Analyze with AI" : "Analyze with AI (metadata only)"}
+                            </>
+                          )}
+                        </button>
+                      </div>
                     )}
 
                     {/* Dial button */}
