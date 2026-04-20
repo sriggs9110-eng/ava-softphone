@@ -5,7 +5,11 @@ export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // Public routes — no auth required
-  if (pathname === "/login" || pathname.startsWith("/api/telnyx/webhook")) {
+  if (
+    pathname === "/login" ||
+    pathname.startsWith("/api/telnyx/webhook") ||
+    pathname.startsWith("/api/cron/")
+  ) {
     return NextResponse.next();
   }
 
