@@ -12,6 +12,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { ActiveCallInfo } from "@/app/lib/types";
+import PepperMascot, { PepperState } from "@/components/pepper/PepperMascot";
 
 interface ActiveCallUIProps {
   call: ActiveCallInfo;
@@ -82,32 +83,41 @@ export default function ActiveCallUI({
       ? formatDuration(elapsed)
       : call.status;
 
+  const pepperState: PepperState =
+    call.status === "dialing" || call.status === "ringing"
+      ? "thinking"
+      : call.status === "held"
+      ? "listening"
+      : "listening";
+
   return (
-    <div className="flex flex-col items-center gap-8 w-full max-w-[380px] mx-auto py-8 animate-slide-up relative">
+    <div className="flex flex-col lg:flex-row items-center lg:items-start justify-center gap-6 lg:gap-10 w-full py-8 animate-slide-up relative">
+      {/* Main call panel */}
+      <div className="flex flex-col items-center gap-7 w-full max-w-[380px]">
       {/* Status indicator */}
       {call.status === "active" && (
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-leaf border-2 border-navy shadow-pop-sm">
           <div className="relative">
-            <div className="w-2.5 h-2.5 rounded-full bg-green" />
-            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-green animate-pulse-ring" />
+            <div className="w-2.5 h-2.5 rounded-full bg-white border border-navy" />
+            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-white animate-pulse-ring" />
           </div>
-          <span className="text-[11px] font-medium uppercase tracking-wider text-green">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-white">
             Connected
           </span>
         </div>
       )}
 
       {call.status === "held" && (
-        <div className="px-3 py-1 rounded-full bg-amber/15 border border-amber/30">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-amber">
+        <div className="px-3 py-1 rounded-full bg-banana border-2 border-navy shadow-pop-sm">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-navy">
             On Hold
           </span>
         </div>
       )}
 
       {(call.status === "dialing" || call.status === "ringing") && (
-        <div className="px-3 py-1 rounded-full bg-accent/15 border border-accent/30">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-accent">
+        <div className="px-3 py-1 rounded-full bg-banana border-2 border-navy shadow-pop-sm">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-navy">
             {call.status === "dialing" ? "Dialing" : "Ringing"}
           </span>
         </div>
@@ -115,16 +125,16 @@ export default function ActiveCallUI({
 
       {/* Number */}
       <div className="text-center">
-        <p className="text-[28px] font-semibold text-text-primary tracking-[1px]">
+        <p className="text-[32px] font-semibold text-navy tracking-[0.5px] font-display">
           {call.number}
         </p>
-        <p className="text-[12px] text-text-tertiary mt-1 uppercase tracking-[0.5px] font-medium">
+        <p className="text-[11px] text-slate mt-1 uppercase tracking-[0.5px] font-bold">
           {call.direction === "inbound" ? "Incoming Call" : "Outgoing Call"}
         </p>
       </div>
 
       {/* Timer */}
-      <p className="text-[36px] font-bold text-text-primary tabular-nums">
+      <p className="text-[48px] font-bold text-navy tabular-nums font-display">
         {statusLabel}
       </p>
 
@@ -134,14 +144,14 @@ export default function ActiveCallUI({
           icon={call.isMuted ? <MicOff size={18} /> : <Mic size={18} />}
           label={call.isMuted ? "Unmute" : "Mute"}
           active={call.isMuted}
-          activeColor="accent"
+          activeColor="banana"
           onClick={onToggleMute}
         />
         <ActionBtn
           icon={call.isHeld ? <Play size={18} /> : <Pause size={18} />}
           label={call.isHeld ? "Resume" : "Hold"}
           active={call.isHeld}
-          activeColor="amber"
+          activeColor="banana"
           onClick={onToggleHold}
         />
         <ActionBtn
@@ -177,38 +187,52 @@ export default function ActiveCallUI({
       {/* End Call */}
       <button
         onClick={onHangup}
-        className="w-14 h-14 rounded-full bg-red hover:bg-red/90 flex items-center justify-center transition-all duration-150 active:scale-95 mt-4"
+        className="w-16 h-16 rounded-full bg-coral border-[2.5px] border-navy flex items-center justify-center transition-all duration-150 active:scale-95 mt-4 shadow-pop-md shadow-pop-hover"
         aria-label="End Call"
       >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="white">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="white">
           <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.69 8.68 7.61 7 12 7s8.31 1.68 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
         </svg>
       </button>
 
       {/* Calling from */}
-      <p className="text-[12px] text-text-tertiary">
+      <p className="text-[12px] text-slate">
         Calling from: {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not set"}
       </p>
+      </div>
+
+      {/* Right rail — Pepper coach panel */}
+      <aside className="w-full lg:w-[280px] shrink-0">
+        <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md flex flex-col items-center text-center">
+          <PepperMascot state={pepperState} size="md" />
+          <p className="mt-3 text-[15px] font-semibold text-navy font-display">
+            Pepper&apos;s listening
+          </p>
+          <p className="mt-1 text-[13px] text-slate font-accent text-lg leading-tight">
+            I&rsquo;ll jump in if you need me.
+          </p>
+        </div>
+      </aside>
 
       {/* DTMF Keypad Overlay */}
       {showKeypad && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-bg-app/70 backdrop-blur-sm"
+          className="fixed inset-0 z-40 flex items-center justify-center bg-navy/60 backdrop-blur-sm"
           onClick={() => setShowKeypad(false)}
         >
           <div
-            className="bg-bg-surface border border-border-subtle rounded-xl p-5 w-full max-w-[280px] animate-slide-up"
+            className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 w-full max-w-[280px] animate-slide-up shadow-pop-lg"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Digit display */}
-            <div className="text-center mb-4 h-8">
+            <div className="text-center mb-4 h-8 relative">
               {dtmfDigits && (
-                <p className="text-[20px] font-semibold text-text-primary tracking-[2px] tabular-nums">
+                <p className="text-[22px] font-semibold text-navy tracking-[2px] tabular-nums font-display">
                   {dtmfDigits}
                 </p>
               )}
               {dtmfFlash && (
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[48px] font-bold text-accent opacity-50 pointer-events-none animate-fade-in">
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[56px] font-bold text-banana opacity-70 pointer-events-none animate-fade-in font-display">
                   {dtmfFlash}
                 </div>
               )}
@@ -220,7 +244,7 @@ export default function ActiveCallUI({
                 <button
                   key={key}
                   onClick={() => handleDTMF(key)}
-                  className="w-14 h-14 mx-auto rounded-full bg-bg-elevated hover:bg-bg-hover active:scale-95 text-xl font-semibold text-text-primary transition-all duration-100"
+                  className="w-14 h-14 mx-auto rounded-full bg-cream-2 border-2 border-navy active:scale-95 text-xl font-semibold text-navy transition-all duration-100 shadow-pop-sm shadow-pop-hover font-display"
                 >
                   {key}
                 </button>
@@ -230,7 +254,7 @@ export default function ActiveCallUI({
             {/* Close */}
             <button
               onClick={() => setShowKeypad(false)}
-              className="w-full mt-4 py-2.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-medium transition-colors"
+              className="w-full mt-4 py-2.5 rounded-full bg-paper border-2 border-navy text-navy text-sm font-semibold transition-colors shadow-pop-sm shadow-pop-hover"
             >
               Close
             </button>
@@ -245,29 +269,29 @@ function ActionBtn({
   icon,
   label,
   active,
-  activeColor = "accent",
+  activeColor = "banana",
   onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   active?: boolean;
-  activeColor?: "accent" | "amber";
+  activeColor?: "banana" | "coral";
   onClick: () => void;
 }) {
   const activeBg =
-    activeColor === "amber"
-      ? "bg-amber text-bg-app"
-      : "bg-accent text-text-on-accent";
+    activeColor === "coral"
+      ? "bg-coral text-white"
+      : "bg-banana text-navy";
 
   return (
     <button
       onClick={onClick}
-      className={`flex flex-col items-center gap-1.5 w-16 py-3 rounded-xl transition-all duration-150 hover:-translate-y-px min-h-[44px] ${
-        active ? activeBg : "bg-bg-elevated hover:bg-bg-hover text-text-secondary"
+      className={`flex flex-col items-center justify-center gap-1.5 w-[72px] py-3 rounded-[14px] border-[2.5px] border-navy transition-all duration-150 min-h-[56px] shadow-pop-sm shadow-pop-hover ${
+        active ? activeBg : "bg-paper text-navy"
       }`}
     >
       {icon}
-      <span className="text-[10px] font-medium uppercase tracking-[0.5px]">
+      <span className="text-[10px] font-bold uppercase tracking-[0.5px]">
         {label}
       </span>
     </button>

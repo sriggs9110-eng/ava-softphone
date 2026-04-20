@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -33,25 +34,26 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-[#111111] px-4">
-      <div className="w-full max-w-sm animate-fade-in">
-        {/* Logo */}
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 rounded-2xl bg-accent flex items-center justify-center mb-4">
-            <span className="text-white font-bold text-2xl">A</span>
-          </div>
-          <h1 className="text-xl font-semibold text-text-primary">
-            Ava Softphone
+    <div className="relative min-h-screen w-full flex items-center justify-center bg-cream px-4 pepper-gradients overflow-hidden">
+      <div className="w-full max-w-sm animate-fade-in relative z-[1]">
+        {/* Pepper mascot header */}
+        <div className="flex flex-col items-center mb-6">
+          <PepperMascot size="lg" state="listening" className="mb-3 drop-shadow-[4px_4px_0_#1B2340]" />
+          <h1 className="text-4xl font-semibold text-navy font-display tracking-tight">
+            Pepper
           </h1>
-          <p className="text-[12px] text-text-tertiary mt-1 uppercase tracking-[0.5px] font-medium">
-            Sign in to continue
+          <p className="text-[13px] text-slate mt-1 font-accent text-lg">
+            your AI sales coach
           </p>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Form card */}
+        <form
+          onSubmit={handleSubmit}
+          className="bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-lg p-6 space-y-4"
+        >
           <div>
-            <label className="block text-[12px] text-text-tertiary uppercase tracking-wider font-medium mb-1.5">
+            <label className="block text-[11px] text-navy uppercase tracking-wider font-bold mb-1.5">
               Email
             </label>
             <input
@@ -60,13 +62,13 @@ export default function LoginPage() {
               onChange={(e) => setEmail(e.target.value)}
               required
               autoFocus
-              className="w-full px-4 py-3 text-sm bg-bg-elevated border border-border-subtle rounded-lg text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition-all"
+              className="w-full px-4 py-3 text-sm bg-cream-3 border-2 border-navy rounded-[10px] text-navy placeholder:text-slate-2 focus:outline-none focus:bg-banana/30 transition-colors"
               placeholder="you@company.com"
             />
           </div>
 
           <div>
-            <label className="block text-[12px] text-text-tertiary uppercase tracking-wider font-medium mb-1.5">
+            <label className="block text-[11px] text-navy uppercase tracking-wider font-bold mb-1.5">
               Password
             </label>
             <input
@@ -74,13 +76,13 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              className="w-full px-4 py-3 text-sm bg-bg-elevated border border-border-subtle rounded-lg text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition-all"
+              className="w-full px-4 py-3 text-sm bg-cream-3 border-2 border-navy rounded-[10px] text-navy placeholder:text-slate-2 focus:outline-none focus:bg-banana/30 transition-colors"
               placeholder="••••••••"
             />
           </div>
 
           {error && (
-            <div className="px-3 py-2.5 rounded-lg bg-red/10 border border-red/20 text-red text-[13px]">
+            <div className="px-3 py-2.5 rounded-[10px] bg-rose border-2 border-navy text-navy text-[13px] font-medium">
               {error}
             </div>
           )}
@@ -88,13 +90,13 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 disabled:opacity-50 min-h-[44px]"
+            className="w-full py-3 rounded-full bg-banana border-[2.5px] border-navy text-navy text-sm font-bold transition-all disabled:opacity-50 min-h-[48px] shadow-pop-sm shadow-pop-hover"
           >
             {loading ? "Signing in..." : "Sign In"}
           </button>
         </form>
 
-        <p className="text-center text-[11px] text-text-tertiary mt-6">
+        <p className="text-center text-[12px] text-slate mt-6">
           Contact your admin if you need an account
         </p>
       </div>

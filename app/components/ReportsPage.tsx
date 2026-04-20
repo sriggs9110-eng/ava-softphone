@@ -20,6 +20,7 @@ import {
   Cell,
 } from "recharts";
 import { CallHistoryEntry } from "@/app/lib/types";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 interface ReportsPageProps {
   entries: CallHistoryEntry[];
@@ -79,10 +80,10 @@ export default function ReportsPage({ entries }: ReportsPageProps) {
       }
     });
     return [
-      { name: "Connected", value: counts.completed, color: "#22c55e" },
-      { name: "No Answer", value: counts["no-answer"], color: "#f59e0b" },
-      { name: "Voicemail", value: counts.voicemail, color: "#ef4444" },
-      { name: "Missed", value: counts.missed, color: "#737373" },
+      { name: "Connected", value: counts.completed, color: "#2FB67C" },
+      { name: "No Answer", value: counts["no-answer"], color: "#FFCE3A" },
+      { name: "Voicemail", value: counts.voicemail, color: "#FF7A5C" },
+      { name: "Missed", value: counts.missed, color: "#6B6E85" },
     ].filter((d) => d.value > 0);
   }, [entries]);
 
@@ -98,10 +99,24 @@ export default function ReportsPage({ entries }: ReportsPageProps) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `ava-calls-${new Date().toISOString().split("T")[0]}.csv`;
+    a.download = `pepper-calls-${new Date().toISOString().split("T")[0]}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  if (entries.length === 0) {
+    return (
+      <div className="flex flex-col items-center text-center py-16 px-6">
+        <PepperMascot size="md" state="coach" />
+        <h3 className="mt-4 text-xl font-semibold text-navy font-display">
+          No numbers to crunch yet
+        </h3>
+        <p className="mt-1 text-[14px] text-slate max-w-xs font-accent text-lg leading-snug">
+          Make a few calls and Pepper will bring receipts.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full animate-fade-in space-y-6">
@@ -130,8 +145,8 @@ export default function ReportsPage({ entries }: ReportsPageProps) {
       </div>
 
       {/* Daily Chart */}
-      <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-        <h3 className="text-sm font-semibold text-text-primary mb-4">
+      <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+        <h3 className="text-base font-semibold text-navy mb-4 font-display">
           Calls Per Day (Last 30 Days)
         </h3>
         <div className="h-[250px]">
@@ -139,28 +154,29 @@ export default function ReportsPage({ entries }: ReportsPageProps) {
             <BarChart data={dailyData}>
               <XAxis
                 dataKey="date"
-                tick={{ fill: "#737373", fontSize: 10 }}
-                axisLine={{ stroke: "#333333" }}
+                tick={{ fill: "#6B6E85", fontSize: 10 }}
+                axisLine={{ stroke: "#1B2340" }}
                 tickLine={false}
                 interval={4}
               />
               <YAxis
-                tick={{ fill: "#737373", fontSize: 10 }}
-                axisLine={{ stroke: "#333333" }}
+                tick={{ fill: "#6B6E85", fontSize: 10 }}
+                axisLine={{ stroke: "#1B2340" }}
                 tickLine={false}
                 allowDecimals={false}
               />
               <Tooltip
                 contentStyle={{
-                  background: "#242424",
-                  border: "1px solid #333333",
-                  borderRadius: "8px",
+                  background: "#FFFEFA",
+                  border: "2px solid #1B2340",
+                  borderRadius: "10px",
                   fontSize: "12px",
-                  color: "#f5f5f5",
+                  color: "#1B2340",
+                  boxShadow: "4px 4px 0 #1B2340",
                 }}
-                cursor={{ fill: "rgba(232,80,42,0.1)" }}
+                cursor={{ fill: "rgba(255, 206, 58, 0.25)" }}
               />
-              <Bar dataKey="count" fill="#e8502a" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="count" fill="#FFCE3A" stroke="#1B2340" strokeWidth={1.5} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -169,8 +185,8 @@ export default function ReportsPage({ entries }: ReportsPageProps) {
       {/* Breakdown + Export */}
       <div className="flex gap-4 flex-wrap">
         {breakdownData.length > 0 && (
-          <div className="flex-1 min-w-[280px] bg-bg-surface border border-border-subtle rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-text-primary mb-4">
+          <div className="flex-1 min-w-[280px] bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+            <h3 className="text-base font-semibold text-navy mb-4 font-display">
               Call Breakdown
             </h3>
             <div className="flex items-center gap-6">
@@ -216,7 +232,7 @@ export default function ReportsPage({ entries }: ReportsPageProps) {
         <div className="flex items-end">
           <button
             onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-3 rounded-lg bg-bg-elevated border border-border-subtle hover:bg-bg-hover text-text-secondary text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
+            className="flex items-center gap-2 px-4 py-3 rounded-full bg-paper border-[2.5px] border-navy text-navy text-sm font-semibold transition-all duration-150 min-h-[48px] shadow-pop-sm shadow-pop-hover"
           >
             <Download size={16} />
             Export CSV
@@ -237,14 +253,16 @@ function StatCard({
   value: string;
 }) {
   return (
-    <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
+    <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
       <div className="flex items-center justify-between mb-3">
-        <span className="text-[12px] text-text-tertiary uppercase tracking-[0.5px] font-medium">
+        <span className="text-[11px] text-slate uppercase tracking-[0.5px] font-bold">
           {label}
         </span>
-        <span className="text-text-tertiary">{icon}</span>
+        <span className="w-8 h-8 rounded-full bg-banana border-2 border-navy flex items-center justify-center text-navy">
+          {icon}
+        </span>
       </div>
-      <p className="text-[36px] font-bold text-text-primary tabular-nums leading-none">
+      <p className="text-[36px] font-bold text-navy tabular-nums leading-none font-display">
         {value}
       </p>
     </div>

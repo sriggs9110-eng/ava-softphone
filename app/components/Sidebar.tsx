@@ -14,6 +14,7 @@ import { AgentStatus, ConnectionStatus } from "@/app/lib/types";
 import ConnectionQuality, { QualityLevel } from "@/app/components/ConnectionQuality";
 import { ShortcutsButton } from "@/app/components/KeyboardShortcuts";
 import { useAuth } from "@/lib/auth-context";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 export type NavPage =
   | "phone"
@@ -37,10 +38,10 @@ interface SidebarProps {
 }
 
 const STATUS_COLORS: Record<AgentStatus, string> = {
-  available: "bg-green",
-  "on-call": "bg-amber",
-  "after-call-work": "bg-text-tertiary",
-  dnd: "bg-red",
+  available: "bg-leaf",
+  "on-call": "bg-banana",
+  "after-call-work": "bg-slate-2",
+  dnd: "bg-coral",
 };
 
 const STATUS_LABELS: Record<AgentStatus, string> = {
@@ -51,15 +52,15 @@ const STATUS_LABELS: Record<AgentStatus, string> = {
 };
 
 const ROLE_BADGE_COLORS: Record<string, string> = {
-  admin: "bg-accent/15 text-accent border-accent/30",
-  manager: "bg-green/15 text-green border-green/30",
-  agent: "bg-text-tertiary/15 text-text-tertiary border-text-tertiary/30",
+  admin: "bg-banana text-navy border-navy",
+  manager: "bg-leaf text-white border-navy",
+  agent: "bg-cream-2 text-navy border-navy",
 };
 
 const AVATAR_COLORS: Record<string, string> = {
-  admin: "bg-accent/15 text-accent",
-  manager: "bg-green/15 text-green",
-  agent: "bg-bg-elevated text-text-secondary",
+  admin: "bg-banana text-navy",
+  manager: "bg-leaf text-white",
+  agent: "bg-cream-2 text-navy",
 };
 
 export default function Sidebar({
@@ -76,7 +77,6 @@ export default function Sidebar({
 }: SidebarProps) {
   const { user, isManager, isAdmin, logout } = useAuth();
 
-  // Build nav items based on role
   const navItems: { page: NavPage; icon: typeof Phone; label: string }[] = [
     { page: "phone", icon: Phone, label: "Phone" },
     { page: "history", icon: Clock, label: "History" },
@@ -91,48 +91,63 @@ export default function Sidebar({
   }
 
   return (
-    <nav className="w-[72px] bg-bg-surface border-r border-border-subtle flex flex-col items-center py-5 gap-1.5 shrink-0">
-      {/* Logo */}
-      <div className="w-10 h-10 rounded-xl bg-accent flex items-center justify-center mb-5">
-        <span className="text-text-on-accent font-bold text-lg">A</span>
+    <nav className="w-[80px] bg-navy border-r-[2.5px] border-navy flex flex-col items-center py-5 gap-2 shrink-0 relative z-10">
+      {/* Logo — banana square with tiny pepper */}
+      <div className="w-12 h-12 rounded-[14px] bg-banana border-[2.5px] border-navy shadow-pop-sm flex items-center justify-center mb-4">
+        <PepperMascot size="xs" state="listening" />
       </div>
 
       {/* Nav Items */}
-      {navItems.map(({ page, icon: Icon, label }) => (
-        <button
-          key={page}
-          onClick={() => onNavigate(page)}
-          className={`group relative w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
-            activePage === page
-              ? "bg-accent text-text-on-accent"
-              : "text-text-tertiary hover:text-text-secondary hover:bg-bg-elevated"
-          }`}
-        >
-          <Icon size={20} />
-          {page === "phone" && agentStatus === "dnd" && (
-            <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red border-2 border-bg-surface" />
-          )}
-          <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-bg-elevated border border-border-subtle rounded-lg text-[11px] text-text-secondary whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-            {label}
-          </div>
-        </button>
-      ))}
+      {navItems.map(({ page, icon: Icon, label }) => {
+        const active = activePage === page;
+        return (
+          <button
+            key={page}
+            onClick={() => onNavigate(page)}
+            className={`group relative w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-150 ${
+              active
+                ? "bg-banana text-navy"
+                : "text-white/50 hover:text-white hover:bg-navy-2"
+            }`}
+          >
+            {active && (
+              <span
+                className="absolute -left-[12px] top-1.5 bottom-1.5 w-1 rounded-r bg-coral"
+                aria-hidden
+              />
+            )}
+            <Icon size={20} strokeWidth={2.25} />
+            {page === "phone" && agentStatus === "dnd" && (
+              <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-coral border-2 border-navy" />
+            )}
+            <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-navy border-2 border-banana rounded-lg text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+              {label}
+            </div>
+          </button>
+        );
+      })}
 
       {/* Divider */}
-      <div className="w-6 h-px bg-border-subtle my-2" />
+      <div className="w-6 h-px bg-white/20 my-2" />
 
       {/* Settings — admin only */}
       {isAdmin && (
         <button
           onClick={() => onNavigate("settings")}
-          className={`group relative w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
+          className={`group relative w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-150 ${
             activePage === "settings"
-              ? "bg-accent text-text-on-accent"
-              : "text-text-tertiary hover:text-text-secondary hover:bg-bg-elevated"
+              ? "bg-banana text-navy"
+              : "text-white/50 hover:text-white hover:bg-navy-2"
           }`}
         >
-          <Settings size={20} />
-          <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-bg-elevated border border-border-subtle rounded-lg text-[11px] text-text-secondary whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+          {activePage === "settings" && (
+            <span
+              className="absolute -left-[12px] top-1.5 bottom-1.5 w-1 rounded-r bg-coral"
+              aria-hidden
+            />
+          )}
+          <Settings size={20} strokeWidth={2.25} />
+          <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-navy border-2 border-banana rounded-lg text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
             Settings
           </div>
         </button>
@@ -161,13 +176,13 @@ export default function Sidebar({
         <div
           className={`w-2.5 h-2.5 rounded-full ${
             connectionStatus === "connected"
-              ? "bg-green"
+              ? "bg-leaf"
               : connectionStatus === "connecting"
-              ? "bg-amber animate-pulse"
-              : "bg-red"
+              ? "bg-banana animate-pulse"
+              : "bg-coral"
           }`}
         />
-        <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-bg-elevated border border-border-subtle rounded-lg text-[11px] text-text-secondary whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+        <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-navy border-2 border-banana rounded-lg text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
           {connectionStatus === "connected"
             ? "Connected to Telnyx"
             : connectionStatus === "connecting"
@@ -195,7 +210,6 @@ function UserMenu({
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Close on click outside
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
@@ -214,45 +228,45 @@ function UserMenu({
         className="w-10 h-10 rounded-full flex items-center justify-center relative"
       >
         <div
-          className={`w-8 h-8 rounded-full flex items-center justify-center text-[11px] font-semibold ${
+          className={`w-9 h-9 rounded-full border-2 border-navy flex items-center justify-center text-[12px] font-semibold ${
             AVATAR_COLORS[user?.role || "agent"]
           }`}
         >
           {user?.full_name?.charAt(0)?.toUpperCase() || "?"}
         </div>
         <div
-          className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${STATUS_COLORS[agentStatus]} border-2 border-bg-surface`}
+          className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${STATUS_COLORS[agentStatus]} border-2 border-navy`}
         />
       </button>
 
       {open && (
-        <div className="absolute left-full bottom-0 ml-2 bg-bg-surface border border-border-subtle rounded-xl overflow-hidden z-50 w-52 shadow-2xl animate-fade-in">
+        <div className="absolute left-full bottom-0 ml-3 bg-paper border-[2.5px] border-navy rounded-[14px] overflow-hidden z-50 w-60 shadow-pop-md animate-fade-in">
           {/* User info */}
-          <div className="px-3 py-2.5 border-b border-border-subtle">
-            <p className="text-[13px] font-medium text-text-primary truncate">
+          <div className="px-3 py-2.5 border-b-2 border-navy bg-cream-2">
+            <p className="text-[13px] font-semibold text-navy truncate font-display">
               {user?.full_name || "Unknown"}
             </p>
             <div className="flex items-center gap-1.5 mt-1">
               <span
-                className={`px-1.5 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wider ${
+                className={`px-1.5 py-0.5 rounded-full border text-[9px] font-bold uppercase tracking-wider ${
                   ROLE_BADGE_COLORS[user?.role || "agent"]
                 }`}
               >
                 {user?.role || "agent"}
               </span>
-              <span className="text-[10px] text-text-tertiary truncate">
+              <span className="text-[10px] text-slate truncate">
                 {user?.email}
               </span>
             </div>
           </div>
 
           {/* Status header */}
-          <div className="px-3 py-2 border-b border-border-subtle">
-            <p className="text-[10px] text-text-tertiary uppercase tracking-wider font-medium">
+          <div className="px-3 py-2 border-b-2 border-navy">
+            <p className="text-[10px] text-slate uppercase tracking-wider font-semibold">
               Status
             </p>
             {acwCountdown !== null && (
-              <p className="text-[11px] text-amber mt-0.5">
+              <p className="text-[11px] text-coral-deep mt-0.5 font-semibold">
                 ACW: {acwCountdown}s remaining
               </p>
             )}
@@ -266,37 +280,35 @@ function UserMenu({
                 onAgentStatusChange(s);
                 setOpen(false);
               }}
-              className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] transition-colors ${
+              className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] transition-colors border-b border-navy/10 ${
                 agentStatus === s
-                  ? "bg-bg-elevated text-text-primary"
-                  : "text-text-secondary hover:bg-bg-hover"
+                  ? "bg-banana text-navy font-semibold"
+                  : "text-navy-2 hover:bg-cream-3"
               }`}
             >
-              <div className={`w-2 h-2 rounded-full ${STATUS_COLORS[s]}`} />
+              <div className={`w-2.5 h-2.5 rounded-full border border-navy ${STATUS_COLORS[s]}`} />
               {STATUS_LABELS[s]}
             </button>
           ))}
           {(agentStatus === "on-call" || agentStatus === "after-call-work") && (
-            <div className="flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-text-tertiary">
-              <div className={`w-2 h-2 rounded-full ${STATUS_COLORS[agentStatus]}`} />
+            <div className="flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-slate border-b border-navy/10">
+              <div className={`w-2.5 h-2.5 rounded-full border border-navy ${STATUS_COLORS[agentStatus]}`} />
               {STATUS_LABELS[agentStatus]}
               <span className="text-[10px] ml-auto">(auto)</span>
             </div>
           )}
 
           {/* Logout */}
-          <div className="border-t border-border-subtle">
-            <button
-              onClick={() => {
-                setOpen(false);
-                logout();
-              }}
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] text-text-secondary hover:text-red hover:bg-red/5 transition-colors"
-            >
-              <LogOut size={14} />
-              Sign Out
-            </button>
-          </div>
+          <button
+            onClick={() => {
+              setOpen(false);
+              logout();
+            }}
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left text-[13px] text-navy-2 hover:text-white hover:bg-coral transition-colors font-semibold"
+          >
+            <LogOut size={14} />
+            Sign Out
+          </button>
         </div>
       )}
     </div>

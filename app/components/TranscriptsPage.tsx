@@ -3,13 +3,13 @@
 import { useState, useMemo } from "react";
 import {
   Search,
-  FileText,
   PhoneIncoming,
   PhoneOutgoing,
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
 import { CallHistoryEntry, AIAnalysis } from "@/app/lib/types";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 interface TranscriptsPageProps {
   entries: CallHistoryEntry[];
@@ -68,11 +68,14 @@ export default function TranscriptsPage({ entries }: TranscriptsPageProps) {
 
   if (analyzedEntries.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-text-tertiary animate-fade-in">
-        <FileText size={40} className="mb-3 opacity-30" />
-        <p className="text-sm text-center max-w-xs">
-          No analyzed calls yet. Use the AI button on the History page to
-          analyze calls, then view results here.
+      <div className="flex flex-col items-center text-center py-16 px-6 animate-fade-in">
+        <PepperMascot size="md" state="coach" />
+        <h3 className="mt-4 text-xl font-semibold text-navy font-display">
+          No transcripts yet
+        </h3>
+        <p className="mt-1 text-[14px] text-slate max-w-sm font-accent text-lg leading-snug">
+          Hit the AI button on a call in History and Pepper will transcribe and
+          score it for you here.
         </p>
       </div>
     );

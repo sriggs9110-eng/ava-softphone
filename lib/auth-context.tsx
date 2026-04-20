@@ -17,6 +17,7 @@ export interface SoftphoneUser {
   role: "agent" | "manager" | "admin";
   extension: string | null;
   status: string;
+  pepper_spice?: "mild" | "medium" | "hot" | null;
 }
 
 interface AuthContextValue {
@@ -61,7 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data, error } = await supabase
       .from("softphone_users")
-      .select("id, email, full_name, role, extension, status")
+      .select("id, email, full_name, role, extension, status, pepper_spice")
       .eq("id", authUser.id)
       .single();
 

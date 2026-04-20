@@ -16,6 +16,8 @@ import TranscriptsPage from "@/app/components/TranscriptsPage";
 import AfterCallWork from "@/app/components/AfterCallWork";
 import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
+import PepperSpiceCard from "@/components/pepper/PepperSpiceCard";
+import CoachingTogglesCard from "@/components/pepper/CoachingTogglesCard";
 import { Loader2 } from "lucide-react";
 import { insertCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
 import { CallHistoryEntry } from "@/app/lib/types";
@@ -282,16 +284,12 @@ export default function Home() {
       : PAGE_TITLES[activePage];
 
   return (
-    <div className="flex w-full min-h-screen bg-bg-app">
+    <div className="flex w-full min-h-screen bg-cream relative">
       <audio ref={audioRef} id="remote-audio" autoPlay playsInline />
 
       <Sidebar
         activePage={activePage}
         onNavigate={(page) => {
-          if (page === "settings" && isAdmin) {
-            router.push("/settings/users");
-            return;
-          }
           setActivePage(page);
         }}
         connectionStatus={connectionStatus}
@@ -327,25 +325,25 @@ export default function Home() {
 
       {/* VM Drop confirm */}
       {showVmConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-app/80 backdrop-blur-sm">
-          <div className="bg-bg-surface border border-border-subtle rounded-xl p-6 max-w-sm w-full mx-4 animate-slide-up">
-            <h3 className="text-base font-semibold text-text-primary mb-2">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-navy/60 backdrop-blur-sm">
+          <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-6 max-w-sm w-full mx-4 animate-slide-up shadow-pop-lg">
+            <h3 className="text-lg font-semibold text-navy mb-2 font-display">
               Drop Voicemail?
             </h3>
-            <p className="text-[13px] text-text-secondary mb-5">
+            <p className="text-[13px] text-navy-2 mb-5">
               This will play a pre-recorded message and disconnect you
               immediately.
             </p>
             <div className="flex gap-3">
               <button
                 onClick={() => setShowVmConfirm(false)}
-                className="flex-1 py-2.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-semibold transition-all min-h-[44px]"
+                className="flex-1 py-2.5 rounded-full bg-paper border-2 border-navy text-navy text-sm font-semibold transition-all min-h-[44px] shadow-pop-sm shadow-pop-hover"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmVmDrop}
-                className="flex-1 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all min-h-[44px]"
+                className="flex-1 py-2.5 rounded-full bg-coral border-2 border-navy text-white text-sm font-semibold transition-all min-h-[44px] shadow-pop-sm shadow-pop-hover"
               >
                 Drop & Disconnect
               </button>
@@ -361,14 +359,14 @@ export default function Home() {
       />
 
       {/* Main content */}
-      <main className="flex-1 flex flex-col overflow-y-auto">
+      <main className="flex-1 flex flex-col overflow-y-auto relative z-[1]">
         <div className="w-full max-w-[1200px] mx-auto px-6 py-8">
           {/* Page Header */}
           <div className="mb-8">
-            <h1 className="text-xl font-semibold text-text-primary">
+            <h1 className="text-3xl font-semibold text-navy font-display">
               {pageInfo.title}
             </h1>
-            <p className="text-[12px] text-text-tertiary mt-1 uppercase tracking-[0.5px] font-medium">
+            <p className="text-[12px] text-slate mt-1 uppercase tracking-[0.5px] font-semibold">
               {pageInfo.subtitle}
             </p>
           </div>
@@ -438,64 +436,74 @@ export default function Home() {
           )}
 
           {/* Settings Page */}
-          {activePage === "settings" && isAdmin && (
-            <div className="max-w-lg space-y-4">
-              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-text-primary mb-1">
+          {activePage === "settings" && user && (
+            <div className="max-w-2xl space-y-5">
+              <PepperSpiceCard
+                userId={user.id}
+                initialSpice={user.pepper_spice ?? "medium"}
+              />
+              <CoachingTogglesCard />
+
+              <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+                <h3 className="text-base font-semibold text-navy font-display mb-2">
                   Connection
                 </h3>
-                <div className="flex items-center gap-2 mt-2">
+                <div className="flex items-center gap-2">
                   <div
-                    className={`w-2 h-2 rounded-full ${
+                    className={`w-2.5 h-2.5 rounded-full border border-navy ${
                       connectionStatus === "connected"
-                        ? "bg-green"
+                        ? "bg-leaf"
                         : connectionStatus === "connecting"
-                        ? "bg-amber"
-                        : "bg-red"
+                        ? "bg-banana"
+                        : "bg-coral"
                     }`}
                   />
-                  <p className="text-[14px] text-text-secondary capitalize">
+                  <p className="text-[14px] text-navy-2 capitalize">
                     {connectionStatus}
                   </p>
                 </div>
               </div>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-text-primary mb-1">
-                  User Management
-                </h3>
-                <button
-                  onClick={() => router.push("/settings/users")}
-                  className="mt-2 text-[13px] text-accent hover:underline"
-                >
-                  Manage users &rarr;
-                </button>
-              </div>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-text-primary mb-1">
+
+              {isAdmin && (
+                <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+                  <h3 className="text-base font-semibold text-navy font-display mb-2">
+                    User Management
+                  </h3>
+                  <button
+                    onClick={() => router.push("/settings/users")}
+                    className="inline-flex items-center gap-1 text-[13px] text-navy font-semibold underline underline-offset-2 decoration-2 decoration-coral"
+                  >
+                    Manage users &rarr;
+                  </button>
+                </div>
+              )}
+
+              <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+                <h3 className="text-base font-semibold text-navy font-display mb-2">
                   Outbound Number
                 </h3>
-                <p className="text-[14px] text-text-secondary tabular-nums mt-1">
+                <p className="text-[14px] text-navy-2 tabular-nums">
                   {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not configured"}
                 </p>
               </div>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-text-primary mb-1">
+
+              <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+                <h3 className="text-base font-semibold text-navy font-display mb-2">
                   Keyboard Shortcuts
                 </h3>
                 <button
                   onClick={() => setShowShortcuts(true)}
-                  className="mt-2 text-[13px] text-accent hover:underline"
+                  className="inline-flex items-center gap-1 text-[13px] text-navy font-semibold underline underline-offset-2 decoration-2 decoration-coral"
                 >
                   View all shortcuts
                 </button>
               </div>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-text-primary mb-1">
+
+              <div className="bg-cream-2 border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+                <h3 className="text-base font-semibold text-navy font-display mb-1">
                   Version
                 </h3>
-                <p className="text-[12px] text-text-tertiary mt-1">
-                  Ava Softphone v0.4.0
-                </p>
+                <p className="text-[12px] text-slate">Pepper v0.5.0</p>
               </div>
             </div>
           )}

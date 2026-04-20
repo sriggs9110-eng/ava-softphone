@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { CallHistoryEntry, AIAnalysis } from "@/app/lib/types";
 import { updateCallLog } from "@/lib/call-logs";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 interface CallHistoryPageProps {
   entries: CallHistoryEntry[];
@@ -141,9 +142,10 @@ export default function CallHistoryPage({
 
       {/* List */}
       {filtered.length === 0 ? (
-        <div className="text-center py-16 text-text-tertiary text-sm">
-          No calls found
-        </div>
+        <EmptyState
+          title="No calls yet"
+          body="Once you make or take a call, Pepper will log it here with scoring and tips."
+        />
       ) : (
         <div className="space-y-1">
           {filtered.map((entry) => {
@@ -462,4 +464,18 @@ function formatCallDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function EmptyState({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="flex flex-col items-center text-center py-16 px-6">
+      <PepperMascot size="md" state="listening" />
+      <h3 className="mt-4 text-xl font-semibold text-navy font-display">
+        {title}
+      </h3>
+      <p className="mt-1 text-[14px] text-slate max-w-xs font-accent text-lg leading-snug">
+        {body}
+      </p>
+    </div>
+  );
 }

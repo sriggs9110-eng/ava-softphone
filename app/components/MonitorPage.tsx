@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Headphones, MessageSquare, Users, Loader2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 interface AgentRow {
   id: string;
@@ -114,9 +115,14 @@ export default function MonitorPage() {
       </div>
 
       {agents.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20 text-text-tertiary">
-          <Users size={40} className="mb-3 opacity-30" />
-          <p className="text-sm">No agents found</p>
+        <div className="flex flex-col items-center text-center py-16 px-6">
+          <PepperMascot size="md" state="thinking" />
+          <h3 className="mt-4 text-xl font-semibold text-navy font-display">
+            No agents yet
+          </h3>
+          <p className="mt-1 text-[14px] text-slate max-w-xs font-accent text-lg leading-snug">
+            Invite your team and Pepper will watch the floor.
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

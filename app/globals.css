@@ -1,24 +1,51 @@
 @import "tailwindcss";
 
 :root {
-  --bg-app: #111111;
-  --bg-surface: #1a1a1a;
-  --bg-elevated: #242424;
-  --bg-hover: #2e2e2e;
-  --border: #333333;
-  --border-subtle: #282828;
-  --accent-primary: #e8502a;
-  --accent-primary-hover: #d4441f;
-  --accent-green: #22c55e;
-  --accent-amber: #f59e0b;
-  --accent-red: #ef4444;
-  --text-primary: #f5f5f5;
-  --text-secondary: #a3a3a3;
-  --text-tertiary: #737373;
-  --text-on-accent: #ffffff;
+  /* Pepper palette */
+  --pepper-banana: #FFCE3A;
+  --pepper-banana-dark: #E8B420;
+  --pepper-banana-deep: #B88A0F;
+  --pepper-coral: #FF7A5C;
+  --pepper-coral-deep: #E55C3D;
+  --pepper-leaf: #2FB67C;
+  --pepper-leaf-dark: #1F8A5A;
+  --pepper-navy: #1B2340;
+  --pepper-navy-2: #2B3356;
+  --pepper-slate: #6B6E85;
+  --pepper-slate-2: #9B9EB0;
+  --pepper-cream: #FFF7E6;
+  --pepper-cream-2: #FFEEC9;
+  --pepper-cream-3: #FFF9EC;
+  --pepper-white: #FFFEFA;
+  --pepper-rose: #FFE3DC;
+  --pepper-sky: #D4EEF5;
+
+  /* Legacy token remap — old dark tokens redirected to Pepper palette so existing components auto-reskin */
+  --bg-app: var(--pepper-cream);
+  --bg-surface: var(--pepper-white);
+  --bg-elevated: var(--pepper-cream-2);
+  --bg-hover: var(--pepper-cream-3);
+  --border: var(--pepper-navy);
+  --border-subtle: var(--pepper-navy);
+  --accent-primary: var(--pepper-banana);
+  --accent-primary-hover: var(--pepper-banana-dark);
+  --accent-green: var(--pepper-leaf);
+  --accent-amber: var(--pepper-banana-deep);
+  --accent-red: var(--pepper-coral);
+  --text-primary: var(--pepper-navy);
+  --text-secondary: var(--pepper-navy-2);
+  --text-tertiary: var(--pepper-slate);
+  --text-on-accent: var(--pepper-navy);
+
+  /* Offset-block shadows */
+  --shadow-pop-sm: 2px 2px 0 var(--pepper-navy);
+  --shadow-pop-md: 4px 4px 0 var(--pepper-navy);
+  --shadow-pop-lg: 7px 7px 0 var(--pepper-navy);
+  --shadow-pop-xl: 10px 10px 0 var(--pepper-navy);
 }
 
 @theme inline {
+  /* Legacy names — remapped values still exposed as Tailwind colors */
   --color-bg-app: var(--bg-app);
   --color-bg-surface: var(--bg-surface);
   --color-bg-elevated: var(--bg-elevated);
@@ -34,14 +61,71 @@
   --color-text-secondary: var(--text-secondary);
   --color-text-tertiary: var(--text-tertiary);
   --color-text-on-accent: var(--text-on-accent);
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+
+  /* Pepper-named tokens */
+  --color-banana: var(--pepper-banana);
+  --color-banana-dark: var(--pepper-banana-dark);
+  --color-banana-deep: var(--pepper-banana-deep);
+  --color-coral: var(--pepper-coral);
+  --color-coral-deep: var(--pepper-coral-deep);
+  --color-leaf: var(--pepper-leaf);
+  --color-leaf-dark: var(--pepper-leaf-dark);
+  --color-navy: var(--pepper-navy);
+  --color-navy-2: var(--pepper-navy-2);
+  --color-slate: var(--pepper-slate);
+  --color-slate-2: var(--pepper-slate-2);
+  --color-cream: var(--pepper-cream);
+  --color-cream-2: var(--pepper-cream-2);
+  --color-cream-3: var(--pepper-cream-3);
+  --color-paper: var(--pepper-white);
+  --color-rose: var(--pepper-rose);
+  --color-sky: var(--pepper-sky);
+
+  --font-sans: var(--font-body), "General Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: var(--font-display), "Fraunces", ui-serif, Georgia, serif;
+  --font-accent: var(--font-accent), "Caveat", ui-serif, cursive;
 }
 
 body {
-  background: var(--bg-app);
-  color: var(--text-primary);
-  font-family: var(--font-sans);
+  background: var(--pepper-cream);
+  color: var(--pepper-navy);
+  font-family: var(--font-body), "General Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
+
+/* Gradient atmosphere layer behind the whole app */
+.pepper-gradients::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(600px circle at 12% 18%, rgba(255, 206, 58, 0.15), transparent 60%),
+    radial-gradient(700px circle at 88% 22%, rgba(255, 122, 92, 0.15), transparent 60%),
+    radial-gradient(800px circle at 55% 90%, rgba(47, 182, 124, 0.15), transparent 60%);
+}
+
+/* Shadow-pop utilities (offset block, no blur) */
+.shadow-pop-sm { box-shadow: var(--shadow-pop-sm); }
+.shadow-pop-md { box-shadow: var(--shadow-pop-md); }
+.shadow-pop-lg { box-shadow: var(--shadow-pop-lg); }
+.shadow-pop-xl { box-shadow: var(--shadow-pop-xl); }
+
+.shadow-pop-hover {
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+.shadow-pop-hover:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: var(--shadow-pop-lg);
+}
+.shadow-pop-hover:active {
+  transform: translate(1px, 1px);
+  box-shadow: var(--shadow-pop-sm);
+}
+
+/* Font convenience */
+.font-display { font-family: var(--font-display), "Fraunces", Georgia, serif; letter-spacing: -0.02em; }
+.font-accent  { font-family: var(--font-accent), "Caveat", cursive; }
 
 /* Animations */
 @keyframes pulse-ring {
@@ -69,8 +153,14 @@ body {
 }
 
 @keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 20px rgba(232, 80, 42, 0.3); }
-  50% { box-shadow: 0 0 30px rgba(232, 80, 42, 0.5); }
+  0%, 100% { box-shadow: 0 0 20px rgba(255, 206, 58, 0.35); }
+  50% { box-shadow: 0 0 30px rgba(255, 206, 58, 0.55); }
+}
+
+@keyframes pepper-wiggle {
+  0%, 100% { transform: rotate(0); }
+  25% { transform: rotate(-3deg); }
+  75% { transform: rotate(3deg); }
 }
 
 .animate-pulse-ring {
@@ -93,17 +183,21 @@ body {
   animation: glow-pulse 2s ease-in-out infinite;
 }
 
+.animate-pepper-wiggle {
+  animation: pepper-wiggle 0.6s ease-in-out;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg-app);
+  background: var(--pepper-cream);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
+  background: var(--pepper-navy);
+  border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--bg-hover);
+  background: var(--pepper-navy-2);
 }
