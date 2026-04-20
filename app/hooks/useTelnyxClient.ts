@@ -409,7 +409,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw, startQualityMonitor, stopQualityMonitor]);
 
   const makeCall = useCallback(
-    (number: string): string | undefined => {
+    async (number: string): Promise<string | undefined> => {
       if (!clientRef.current || connectionStatus !== "connected") return undefined;
       if (agentStatus === "dnd") return undefined;
 
@@ -423,7 +423,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
         audioCtxRef.current.resume();
       }
 
-      const fromNumber = getLocalNumber(number);
+      const fromNumber = await getLocalNumber(number);
 
       const call = clientRef.current.newCall({
         destinationNumber: number,

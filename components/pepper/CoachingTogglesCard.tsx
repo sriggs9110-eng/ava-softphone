@@ -1,51 +1,81 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { CoachingPrefs } from "@/lib/auth-context";
 
-type ToggleKey = "liveCards" | "soundEffects" | "celebration" | "autoWhisper";
+type ToggleKey = keyof CoachingPrefs;
 
 interface ToggleDef {
   key: ToggleKey;
   title: string;
   description?: string;
   experimental?: boolean;
-  defaultOn: boolean;
 }
 
 const TOGGLES: ToggleDef[] = [
   {
-    key: "liveCards",
+    key: "live_cards",
     title: "Live coaching cards",
     description: "Pepper pops up during calls with tips and reminders.",
-    defaultOn: true,
   },
   {
-    key: "soundEffects",
+    key: "sound_fx",
     title: "Sound effects",
     description: "Little chimes on connect, mute, and deal won.",
-    defaultOn: true,
   },
   {
-    key: "celebration",
+    key: "celebrations",
     title: "Celebration animation",
     description: "Confetti when you close a deal. You earned it.",
-    defaultOn: true,
   },
   {
-    key: "autoWhisper",
+    key: "auto_whisper",
     title: "Auto-whisper scripts",
     description: "Pepper reads rebuttals into your headset during objections.",
     experimental: true,
-    defaultOn: false,
   },
 ];
 
-export default function CoachingTogglesCard() {
-  const [state, setState] = useState<Record<ToggleKey, boolean>>(() =>
-    TOGGLES.reduce(
-      (acc, t) => ({ ...acc, [t.key]: t.defaultOn }),
-      {} as Record<ToggleKey, boolean>
-    )
+const DEFAULTS: CoachingPrefs = {
+  live_cards: true,
+  sound_fx: true,
+  celebrations: true,
+  auto_whisper: false,
+};
+
+interface Props {
+  initialPrefs?: CoachingPrefs | null;
+}
+
+export default function CoachingTogglesCard({ initialPrefs }: Props) {
+  const [prefs, setPrefs] = useState<CoachingPrefs>(initialPrefs ?? DEFAULTS);
+  const [saving, setSaving] = useState<ToggleKey | null>(null);
+
+  // If the initial prefs arrive after mount (auth context still loading),
+  // sync once.
+  useEffect(() => {
+    if (initialPrefs) setPrefs({ ...DEFAULTS, ...initialPrefs });
+  }, [initialPrefs]);
+
+  const handleToggle = useCallback(
+    async (key: ToggleKey, value: boolean) => {
+      const previous = prefs;
+      setPrefs({ ...prefs, [key]: value });
+      setSaving(key);
+
+      const res = await fetch("/api/user/coaching-prefs", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [key]: value }),
+      });
+
+      if (!res.ok) {
+        console.error("[coaching-prefs] save failed");
+        setPrefs(previous);
+      }
+      setSaving(null);
+    },
+    [prefs]
   );
 
   return (
@@ -77,8 +107,9 @@ export default function CoachingTogglesCard() {
               )}
             </div>
             <PillToggle
-              on={state[t.key]}
-              onChange={(on) => setState((s) => ({ ...s, [t.key]: on }))}
+              on={prefs[t.key]}
+              onChange={(on) => handleToggle(t.key, on)}
+              disabled={saving === t.key}
               label={t.title}
             />
           </div>
@@ -92,18 +123,21 @@ function PillToggle({
   on,
   onChange,
   label,
+  disabled,
 }: {
   on: boolean;
   onChange: (on: boolean) => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       role="switch"
       aria-checked={on}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!on)}
-      className={`relative shrink-0 w-12 h-[26px] rounded-full border-[2px] border-navy transition-colors ${
+      className={`relative shrink-0 w-12 h-[26px] rounded-full border-[2px] border-navy transition-colors disabled:opacity-60 ${
         on ? "bg-leaf" : "bg-paper"
       }`}
     >

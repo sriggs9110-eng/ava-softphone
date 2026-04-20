@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useTelnyxClient, CallEndInfo } from "@/app/hooks/useTelnyxClient";
+import { useRingGroup } from "@/app/hooks/useRingGroup";
 import { useAuth } from "@/lib/auth-context";
 import Sidebar, { NavPage } from "@/app/components/Sidebar";
 import DialPad from "@/app/components/DialPad";
@@ -112,6 +113,9 @@ export default function Home() {
   const [supabaseEntries, setSupabaseEntries] = useState<CallHistoryEntry[]>([]);
   const activeCallLogIdRef = useRef<string | null>(null);
 
+  const { groupCall, pickupToast, claimPickup, dismissGroupCall } =
+    useRingGroup({ userId: user?.id ?? null, currentUserName: user?.full_name });
+
   // Load call history from Supabase
   const loadCallLogs = useCallback(async () => {
     if (!user) return;
@@ -150,7 +154,7 @@ export default function Home() {
   const handleMakeCall = useCallback(
     async (number: string) => {
       // makeCall returns the callControlId immediately from the SDK
-      const ccid = makeCall(number);
+      const ccid = await makeCall(number);
       if (user) {
         const log = await insertCallLog({
           user_id: user.id,
@@ -169,6 +173,18 @@ export default function Home() {
   const handleAnswerCall = useCallback(async () => {
     const callerNumber = inboundCall?.options?.callerNumber || "Unknown";
     const ccid = answerCall();
+
+    // If this was a ring-group call, notify the other members so their
+    // overlays clear with a "picked up by …" toast.
+    if (groupCall) {
+      claimPickup({
+        call_control_id: groupCall.call_control_id,
+        group_id: groupCall.group_id,
+        member_user_ids: groupCall.member_user_ids,
+      }).catch(() => {});
+      dismissGroupCall();
+    }
+
     if (user) {
       const log = await insertCallLog({
         user_id: user.id,
@@ -180,7 +196,7 @@ export default function Home() {
       if (log) activeCallLogIdRef.current = log.id;
       console.log("[Call] Created inbound log, ccid:", ccid, "logId:", log?.id);
     }
-  }, [answerCall, inboundCall, user]);
+  }, [answerCall, inboundCall, user, groupCall, claimPickup, dismissGroupCall]);
 
   const handleHangup = useCallback(() => {
     hangup();
@@ -306,9 +322,22 @@ export default function Home() {
       {inboundCall && !activeCall && (
         <InboundCallUI
           callerNumber={inboundCall.options.callerNumber || "Unknown"}
+          ringGroupName={groupCall?.group_name}
           onAccept={handleAnswerCall}
           onReject={rejectCall}
         />
+      )}
+
+      {/* Ring-group pickup toast */}
+      {pickupToast && (
+        <div className="fixed top-6 right-6 z-[60] bg-paper border-[2.5px] border-navy rounded-[14px] px-4 py-3 shadow-pop-md animate-slide-up max-w-xs">
+          <p className="text-[13px] font-semibold text-navy font-display">
+            Picked up by {pickupToast.by_name}
+          </p>
+          <p className="text-[12px] text-slate mt-0.5">
+            That ring group call has been answered.
+          </p>
+        </div>
       )}
 
       {/* Transfer overlay */}
@@ -442,7 +471,7 @@ export default function Home() {
                 userId={user.id}
                 initialSpice={user.pepper_spice ?? "medium"}
               />
-              <CoachingTogglesCard />
+              <CoachingTogglesCard initialPrefs={user.coaching_prefs ?? null} />
 
               <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
                 <h3 className="text-base font-semibold text-navy font-display mb-2">

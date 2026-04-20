@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Use local presence: match area code to a local number
-  const fromNumber = from || getLocalNumber(to);
+  const fromNumber = from || (await getLocalNumber(to));
 
   try {
     const response = await fetch("https://api.telnyx.com/v2/calls", {

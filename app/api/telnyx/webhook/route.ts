@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 function getAdmin() {
@@ -7,6 +8,149 @@ function getAdmin() {
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } }
   );
+}
+
+// Dispatch ring-group fan-out: look up the group for the dialed number,
+// find available members, broadcast via Supabase Realtime, and schedule
+// a timeout hangup if nobody answers.
+async function dispatchRingGroup({
+  callControlId,
+  from,
+  to,
+}: {
+  callControlId: string | undefined;
+  from: string;
+  to: string;
+}) {
+  if (!to) return;
+
+  const admin = getAdmin();
+
+  // Try both forms of the number — DB may store with or without + prefix.
+  const candidates = new Set<string>();
+  candidates.add(to);
+  if (to.startsWith("+")) candidates.add(to.slice(1));
+  else candidates.add(`+${to}`);
+
+  const { data: group } = await admin
+    .from("ring_groups")
+    .select("id, name, inbound_number, strategy, ring_timeout_seconds, fallback_action")
+    .in("inbound_number", Array.from(candidates))
+    .limit(1)
+    .maybeSingle();
+
+  if (!group) return;
+
+  const { data: members } = await admin
+    .from("ring_group_members")
+    .select("user_id, priority, softphone_users!inner(id, status, full_name)")
+    .eq("group_id", group.id);
+
+  type MemberRow = {
+    user_id: string;
+    priority: number;
+    softphone_users: { id: string; status: string; full_name: string };
+  };
+
+  const rows = (members || []) as unknown as MemberRow[];
+  const available = rows
+    .filter((m) => m.softphone_users?.status === "available")
+    .sort((a, b) => a.priority - b.priority);
+
+  if (available.length === 0) {
+    console.log(`[Webhook/ring] group=${group.name} — no available members`);
+    return;
+  }
+
+  // For simultaneous, notify everyone at once. For round_robin, still notify
+  // all but the client sorts by priority. Proper round-robin rotation is
+  // a future iteration — flag in ops doc.
+  const recipients = available.map((m) => ({
+    user_id: m.user_id,
+    name: m.softphone_users.full_name,
+  }));
+  const memberIds = recipients.map((r) => r.user_id);
+
+  const payload = {
+    call_control_id: callControlId,
+    from,
+    to,
+    group_id: group.id,
+    group_name: group.name,
+    strategy: group.strategy,
+    member_user_ids: memberIds,
+    fallback_action: group.fallback_action,
+    ring_timeout_seconds: group.ring_timeout_seconds,
+    sent_at: new Date().toISOString(),
+  };
+
+  for (const r of recipients) {
+    try {
+      const ch = admin.channel(`user:${r.user_id}`, {
+        config: { broadcast: { ack: false, self: false } },
+      });
+      await ch.subscribe();
+      await ch.send({
+        type: "broadcast",
+        event: "incoming_group_call",
+        payload,
+      });
+      await admin.removeChannel(ch);
+    } catch (err) {
+      console.error(`[Webhook/ring] broadcast to ${r.user_id} failed:`, err);
+    }
+  }
+  console.log(
+    `[Webhook/ring] group=${group.name} notified ${recipients.length} members`
+  );
+
+  // Timeout enforcement. Best-effort in a serverless function — fires only
+  // while the function instance is alive (Vercel limit applies). For robust
+  // enforcement at scale, wire a cron to sweep ring_attempts.
+  const apiKey = process.env.TELNYX_API_KEY;
+  if (!callControlId || !apiKey) return;
+
+  after(async () => {
+    await new Promise((res) =>
+      setTimeout(res, (group.ring_timeout_seconds ?? 20) * 1000)
+    );
+
+    try {
+      // Check if the call was answered — if so, don't hang up.
+      const { data: row } = await admin
+        .from("call_logs")
+        .select("status")
+        .eq("call_control_id", callControlId)
+        .limit(1)
+        .maybeSingle();
+
+      if (row?.status === "connected" || row?.status === "completed") {
+        console.log(`[Webhook/ring] ccid=${callControlId} answered — no hangup`);
+        return;
+      }
+
+      console.log(
+        `[Webhook/ring] ccid=${callControlId} timed out — fallback=${group.fallback_action}`
+      );
+
+      // v1: only hangup. voicemail fallback is stubbed for a later iteration.
+      if (group.fallback_action === "hangup" || group.fallback_action === "voicemail") {
+        const res = await fetch(
+          `https://api.telnyx.com/v2/calls/${callControlId}/actions/hangup`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        console.log(`[Webhook/ring] hangup status=${res.status}`);
+      }
+    } catch (err) {
+      console.error(`[Webhook/ring] timeout handler error:`, err);
+    }
+  });
 }
 
 function cleanNumber(raw: string): string {
@@ -92,6 +236,16 @@ export async function POST(req: NextRequest) {
 
   switch (eventType) {
     case "call.initiated": {
+      const direction = payload?.direction as string | undefined;
+
+      // Ring group fan-out for inbound calls. Runs alongside existing
+      // bookkeeping — does not replace single-user inbound handling.
+      if (direction === "incoming" || direction === "inbound") {
+        // Fire and await — dispatchRingGroup is cheap and no-ops if no
+        // matching group exists.
+        await dispatchRingGroup({ callControlId: ccid, from, to });
+      }
+
       let row = await findRecentCall(payload);
 
       if (row) {

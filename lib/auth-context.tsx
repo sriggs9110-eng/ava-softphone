@@ -10,6 +10,13 @@ import {
 } from "react";
 import { createClient } from "@/lib/supabase/client";
 
+export interface CoachingPrefs {
+  live_cards: boolean;
+  sound_fx: boolean;
+  celebrations: boolean;
+  auto_whisper: boolean;
+}
+
 export interface SoftphoneUser {
   id: string;
   email: string;
@@ -18,6 +25,7 @@ export interface SoftphoneUser {
   extension: string | null;
   status: string;
   pepper_spice?: "mild" | "medium" | "hot" | null;
+  coaching_prefs?: CoachingPrefs | null;
 }
 
 interface AuthContextValue {
@@ -62,7 +70,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const { data, error } = await supabase
       .from("softphone_users")
-      .select("id, email, full_name, role, extension, status, pepper_spice")
+      .select("id, email, full_name, role, extension, status, pepper_spice, coaching_prefs")
       .eq("id", authUser.id)
       .single();
 

@@ -4,12 +4,14 @@ import PepperMascot from "@/components/pepper/PepperMascot";
 
 interface InboundCallUIProps {
   callerNumber: string;
+  ringGroupName?: string;
   onAccept: () => void;
   onReject: () => void;
 }
 
 export default function InboundCallUI({
   callerNumber,
+  ringGroupName,
   onAccept,
   onReject,
 }: InboundCallUIProps) {
@@ -32,6 +34,11 @@ export default function InboundCallUI({
           <p className="text-[32px] font-semibold text-navy tracking-wide font-display">
             {callerNumber}
           </p>
+          {ringGroupName && (
+            <span className="inline-flex items-center gap-1.5 mt-3 px-2.5 py-1 rounded-full bg-banana border-2 border-navy text-[11px] font-bold uppercase tracking-wider text-navy shadow-pop-sm">
+              Ring group · {ringGroupName}
+            </span>
+          )}
         </div>
 
         {/* Accept / Reject buttons */}
