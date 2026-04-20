@@ -26,6 +26,9 @@ export interface SoftphoneUser {
   status: string;
   pepper_spice?: "mild" | "medium" | "hot" | null;
   coaching_prefs?: CoachingPrefs | null;
+  signal_webhook_url?: string | null;
+  auto_dial_popup?: boolean | null;
+  auto_analyze_calls?: boolean | null;
 }
 
 interface AuthContextValue {
@@ -73,7 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // PostgREST returns a 400. Retry with core columns so the user can still
     // sign in — otherwise auth silently fails and /settings loops to /login.
     const fullCols =
-      "id, email, full_name, role, extension, status, pepper_spice, coaching_prefs";
+      "id, email, full_name, role, extension, status, pepper_spice, coaching_prefs, signal_webhook_url, auto_dial_popup, auto_analyze_calls";
     const coreCols = "id, email, full_name, role, extension, status";
 
     let data: Partial<SoftphoneUser> | null = null;

@@ -1,4 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+
+function getAdmin() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { autoRefreshToken: false, persistSession: false } }
+  );
+}
+
+async function stampStatus(
+  callLogId: string | undefined,
+  updates: Record<string, unknown>
+) {
+  if (!callLogId) return;
+  try {
+    const admin = getAdmin();
+    await admin.from("call_logs").update(updates).eq("id", callLogId);
+  } catch (err) {
+    console.error("[AI] stampStatus failed:", err);
+  }
+}
 
 async function transcribeWithWhisper(
   recordingUrl: string
@@ -10,7 +32,6 @@ async function transcribeWithWhisper(
   }
 
   try {
-    // Download the recording
     console.log("[AI] Downloading recording:", recordingUrl);
     const audioRes = await fetch(recordingUrl);
     if (!audioRes.ok) {
@@ -21,7 +42,6 @@ async function transcribeWithWhisper(
     const audioBlob = await audioRes.blob();
     console.log("[AI] Downloaded audio:", audioBlob.size, "bytes", audioBlob.type);
 
-    // Send to Whisper
     const formData = new FormData();
     formData.append("file", audioBlob, "recording.mp3");
     formData.append("model", "whisper-1");
@@ -32,9 +52,7 @@ async function transcribeWithWhisper(
       "https://api.openai.com/v1/audio/transcriptions",
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${openaiKey}`,
-        },
+        headers: { Authorization: `Bearer ${openaiKey}` },
         body: formData,
       }
     );
@@ -61,6 +79,7 @@ export async function POST(req: NextRequest) {
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
   if (!anthropicKey) {
+    await stampStatus(call_log_id, { ai_status: "failed" });
     return NextResponse.json(
       { error: "Anthropic API key not configured" },
       { status: 500 }
@@ -73,34 +92,30 @@ export async function POST(req: NextRequest) {
   const direction = call_metadata?.direction || "unknown";
   const number = call_metadata?.number || "Unknown";
 
-  // If we have a recording but no transcript, try Whisper
+  // Transcription phase
   if (hasRecording && !transcript) {
+    await stampStatus(call_log_id, { transcript_status: "processing" });
     transcript = await transcribeWithWhisper(recording_url);
 
-    // Save transcript to call_logs if we got one
     if (transcript && call_log_id) {
-      try {
-        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-        const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-        const { createClient } = await import("@supabase/supabase-js");
-        const admin = createClient(supabaseUrl, serviceKey, {
-          auth: { autoRefreshToken: false, persistSession: false },
-        });
-        await admin
-          .from("call_logs")
-          .update({ transcript })
-          .eq("id", call_log_id);
-        console.log("[AI] Saved transcript to call_logs");
-      } catch (err) {
-        console.error("[AI] Failed to save transcript:", err);
-      }
+      await stampStatus(call_log_id, {
+        transcript,
+        transcript_status: "complete",
+      });
+      console.log("[AI] Saved transcript to call_logs");
+    } else if (!transcript && call_log_id) {
+      await stampStatus(call_log_id, { transcript_status: "failed" });
     }
+  } else if (!hasRecording && call_log_id && !transcript) {
+    // No recording at all — nothing to transcribe.
+    await stampStatus(call_log_id, { transcript_status: "none" });
+  } else if (transcript && call_log_id) {
+    await stampStatus(call_log_id, { transcript_status: "complete" });
   }
 
   const hasTranscript = !!transcript;
 
   let analysisContext: string;
-
   if (hasTranscript) {
     analysisContext = `Full transcript of the conversation:\n${transcript}`;
   } else if (hasRecording) {
@@ -137,6 +152,8 @@ Return a JSON object with:
 - highlights: empty array
 Return ONLY valid JSON, no other text.`;
 
+  await stampStatus(call_log_id, { ai_status: "processing" });
+
   try {
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -161,6 +178,7 @@ Return ONLY valid JSON, no other text.`;
     if (!claudeRes.ok) {
       const errData = await claudeRes.json();
       console.error("[AI] Claude error:", errData);
+      await stampStatus(call_log_id, { ai_status: "failed" });
       return NextResponse.json(
         { error: errData.error?.message || "Claude API request failed" },
         { status: claudeRes.status }
@@ -173,6 +191,7 @@ Return ONLY valid JSON, no other text.`;
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       console.error("[AI] Failed to parse:", content);
+      await stampStatus(call_log_id, { ai_status: "failed" });
       return NextResponse.json(
         { error: "Failed to parse AI response" },
         { status: 500 }
@@ -180,9 +199,23 @@ Return ONLY valid JSON, no other text.`;
     }
 
     const analysis = JSON.parse(jsonMatch[0]);
+
+    // Persist AI fields server-side. Previously only the client saved these
+    // via CallHistoryPage.handleAnalyze — now the webhook auto-trigger needs
+    // the endpoint itself to be authoritative.
+    if (call_log_id) {
+      await stampStatus(call_log_id, {
+        ai_analysis: analysis,
+        ai_summary: analysis.summary,
+        ai_score: analysis.score,
+        ai_status: "complete",
+      });
+    }
+
     return NextResponse.json(analysis);
   } catch (err) {
     console.error("[AI] Error:", err);
+    await stampStatus(call_log_id, { ai_status: "failed" });
     return NextResponse.json(
       { error: "Failed to analyze call" },
       { status: 500 }

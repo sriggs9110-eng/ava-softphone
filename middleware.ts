@@ -42,7 +42,13 @@ export async function middleware(request: NextRequest) {
 
   if (!user) {
     const url = request.nextUrl.clone();
+    const originalPath = request.nextUrl.pathname + request.nextUrl.search;
     url.pathname = "/login";
+    url.search = "";
+    // Preserve the intended destination so login can bounce the user back.
+    if (originalPath && originalPath !== "/") {
+      url.searchParams.set("next", originalPath);
+    }
     return NextResponse.redirect(url);
   }
 

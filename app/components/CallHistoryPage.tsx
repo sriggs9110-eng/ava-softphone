@@ -10,6 +10,8 @@ import {
   Loader2,
   ChevronDown,
   ChevronRight,
+  RotateCw,
+  AlertTriangle,
 } from "lucide-react";
 import { CallHistoryEntry, AIAnalysis } from "@/app/lib/types";
 import { updateCallLog } from "@/lib/call-logs";
@@ -222,20 +224,13 @@ export default function CallHistoryPage({
                     </div>
                   )}
 
-                  {/* Analyze button — completely separate, no parent button */}
+                  {/* Status pill / analyze button */}
                   {!entry.aiAnalysis && (
-                    <button
-                      onClick={() => handleAnalyze(entry)}
-                      disabled={analyzingId === entry.id}
-                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-tertiary hover:text-accent text-[11px] font-medium transition-colors disabled:opacity-50"
-                    >
-                      {analyzingId === entry.id ? (
-                        <Loader2 size={12} className="animate-spin" />
-                      ) : (
-                        <TrendingUp size={12} />
-                      )}
-                      AI
-                    </button>
+                    <PipelineStatusControl
+                      entry={entry}
+                      loading={analyzingId === entry.id}
+                      onAnalyze={() => handleAnalyze(entry)}
+                    />
                   )}
                 </div>
 
@@ -464,6 +459,70 @@ function formatCallDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function PipelineStatusControl({
+  entry,
+  loading,
+  onAnalyze,
+}: {
+  entry: CallHistoryEntry;
+  loading: boolean;
+  onAnalyze: () => void;
+}) {
+  const tStatus = entry.transcriptStatus;
+  const aStatus = entry.aiStatus;
+
+  // Auto-pipeline in flight — show a non-actionable pill.
+  if (tStatus === "processing" || aStatus === "processing") {
+    return (
+      <span className="flex items-center gap-1 px-2 py-1 rounded-full bg-sky border-[1.5px] border-navy text-[10px] font-bold uppercase tracking-wider text-navy">
+        <Loader2 size={10} className="animate-spin" />
+        Analyzing
+      </span>
+    );
+  }
+
+  const failed = tStatus === "failed" || aStatus === "failed";
+  if (failed) {
+    return (
+      <button
+        onClick={onAnalyze}
+        disabled={loading}
+        title={
+          tStatus === "failed"
+            ? "Transcription failed — click to retry"
+            : "Analysis failed — click to retry"
+        }
+        className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-rose border-2 border-navy text-navy text-[11px] font-bold uppercase tracking-wider disabled:opacity-50 shadow-pop-sm shadow-pop-hover"
+      >
+        {loading ? (
+          <Loader2 size={11} className="animate-spin" />
+        ) : (
+          <>
+            <AlertTriangle size={11} />
+            <RotateCw size={11} />
+          </>
+        )}
+        Retry
+      </button>
+    );
+  }
+
+  return (
+    <button
+      onClick={onAnalyze}
+      disabled={loading}
+      className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-paper border-2 border-navy text-navy text-[11px] font-bold uppercase tracking-wider disabled:opacity-50 shadow-pop-sm shadow-pop-hover"
+    >
+      {loading ? (
+        <Loader2 size={11} className="animate-spin" />
+      ) : (
+        <TrendingUp size={11} />
+      )}
+      AI
+    </button>
+  );
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) {

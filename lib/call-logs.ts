@@ -1,5 +1,12 @@
 import { createClient } from "@/lib/supabase/client";
 
+export type PipelineStatus =
+  | "pending"
+  | "processing"
+  | "complete"
+  | "failed"
+  | "none";
+
 export interface CallLog {
   id: string;
   user_id: string;
@@ -12,9 +19,11 @@ export interface CallLog {
   call_session_id: string | null;
   from_number: string | null;
   transcript: string | null;
+  transcript_status?: PipelineStatus | null;
   ai_summary: string | null;
   ai_score: number | null;
   ai_analysis: Record<string, unknown> | null;
+  ai_status?: PipelineStatus | null;
   notes: string | null;
   created_at: string;
   // Joined fields
@@ -28,18 +37,21 @@ export async function insertCallLog(log: {
   status?: string;
   call_control_id?: string;
   from_number?: string;
+  external_id?: string | null;
 }): Promise<CallLog | null> {
   const supabase = createClient();
+  const insertRow: Record<string, unknown> = {
+    user_id: log.user_id,
+    direction: log.direction,
+    phone_number: log.phone_number,
+    status: log.status || "initiated",
+    call_control_id: log.call_control_id || null,
+    from_number: log.from_number || null,
+  };
+  if (log.external_id) insertRow.external_id = log.external_id;
   const { data, error } = await supabase
     .from("call_logs")
-    .insert({
-      user_id: log.user_id,
-      direction: log.direction,
-      phone_number: log.phone_number,
-      status: log.status || "initiated",
-      call_control_id: log.call_control_id || null,
-      from_number: log.from_number || null,
-    })
+    .insert(insertRow)
     .select()
     .single();
 

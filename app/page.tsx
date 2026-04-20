@@ -68,6 +68,8 @@ function callLogToEntry(log: CallLog): CallHistoryEntry {
     recordingUrl: log.recording_url || undefined,
     aiAnalysis: parsedAnalysis,
     transcript: parsedTranscript,
+    transcriptStatus: log.transcript_status ?? undefined,
+    aiStatus: log.ai_status ?? undefined,
   };
 }
 

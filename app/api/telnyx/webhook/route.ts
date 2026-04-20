@@ -401,6 +401,94 @@ export async function POST(req: NextRequest) {
         if (rowId) {
           await updateRow(rowId, { recording_url: url });
           console.log(`[Webhook] recording saved to row ${rowId}`);
+
+          // Auto-trigger transcription + analysis when the owner has it on
+          // (default ON). Runs after the response returns so Telnyx doesn't
+          // wait on Whisper/Claude.
+          const rowIdForAfter = rowId;
+          after(async () => {
+            try {
+              const admin = getAdmin();
+              const { data: row } = await admin
+                .from("call_logs")
+                .select(
+                  "id, user_id, phone_number, direction, duration_seconds, status, created_at, recording_url"
+                )
+                .eq("id", rowIdForAfter)
+                .single();
+              if (!row || !row.recording_url) return;
+
+              let autoAnalyze = true;
+              if (row.user_id) {
+                const { data: owner } = await admin
+                  .from("softphone_users")
+                  .select("auto_analyze_calls")
+                  .eq("id", row.user_id)
+                  .single();
+                if (owner && owner.auto_analyze_calls === false) {
+                  autoAnalyze = false;
+                }
+              }
+              if (!autoAnalyze) {
+                console.log(
+                  `[Webhook] auto-analyze off for row ${rowIdForAfter}`
+                );
+                return;
+              }
+
+              const origin = process.env.NEXT_PUBLIC_APP_URL || "";
+              if (!origin) {
+                console.warn(
+                  "[Webhook] NEXT_PUBLIC_APP_URL not set — skipping auto-analyze"
+                );
+                return;
+              }
+
+              const r = await fetch(`${origin}/api/ai/analyze-call`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  recording_url: row.recording_url,
+                  call_log_id: row.id,
+                  call_metadata: {
+                    number: row.phone_number,
+                    direction: row.direction,
+                    duration: row.duration_seconds,
+                    status: row.status,
+                    timestamp: new Date(row.created_at).getTime(),
+                  },
+                }),
+              });
+              console.log(`[Webhook] auto-analyze status=${r.status}`);
+
+              // If the call originated from a CRM pop-up (external_id set),
+              // push a summary to the owner's configured Signal webhook. This
+              // covers the case where the pop-up has already closed by the
+              // time analysis finishes.
+              const { data: enriched } = await admin
+                .from("call_logs")
+                .select("external_id")
+                .eq("id", rowIdForAfter)
+                .single();
+              if (enriched?.external_id) {
+                try {
+                  const cb = await fetch(`${origin}/api/dial/callback`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      call_log_id: rowIdForAfter,
+                      external_id: enriched.external_id,
+                    }),
+                  });
+                  console.log(`[Webhook] crm callback status=${cb.status}`);
+                } catch (cbErr) {
+                  console.error("[Webhook] crm callback failed:", cbErr);
+                }
+              }
+            } catch (err) {
+              console.error("[Webhook] auto-analyze failed:", err);
+            }
+          });
         } else {
           console.warn(`[Webhook] recording.saved — NO ROW FOUND for url=${url}`);
         }

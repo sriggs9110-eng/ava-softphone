@@ -10,10 +10,12 @@ import {
   Users,
   Phone,
   ListTree,
+  Link2,
 } from "lucide-react";
 import Link from "next/link";
 import YourPepperTab from "./your-pepper-tab";
 import CoachingTab from "./coaching-tab";
+import IntegrationsTab from "./integrations-tab";
 import UsersTab from "./users-tab";
 import PhoneNumbersTab from "./phone-numbers-tab";
 import RingGroupsTab from "./ring-groups-tab";
@@ -21,6 +23,7 @@ import RingGroupsTab from "./ring-groups-tab";
 type Tab =
   | "your-pepper"
   | "coaching"
+  | "integrations"
   | "users"
   | "phone-numbers"
   | "ring-groups";
@@ -35,6 +38,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { id: "your-pepper", label: "Your Pepper", icon: Sparkles },
   { id: "coaching", label: "Coaching", icon: Headphones },
+  { id: "integrations", label: "Integrations", icon: Link2 },
   { id: "users", label: "Users", icon: Users, adminOnly: true },
   { id: "phone-numbers", label: "Phone Numbers", icon: Phone, adminOnly: true },
   { id: "ring-groups", label: "Ring Groups", icon: ListTree, adminOnly: true },
@@ -110,6 +114,7 @@ export default function SettingsPage() {
         <div className="mt-2">
           {activeTab === "your-pepper" && <YourPepperTab user={user} />}
           {activeTab === "coaching" && <CoachingTab user={user} />}
+          {activeTab === "integrations" && <IntegrationsTab user={user} />}
           {activeTab === "users" && isAdmin && <UsersTab />}
           {activeTab === "phone-numbers" && isAdmin && <PhoneNumbersTab />}
           {activeTab === "ring-groups" && isAdmin && <RingGroupsTab />}

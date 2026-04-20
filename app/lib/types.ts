@@ -1,3 +1,10 @@
+export type PipelineStatus =
+  | "pending"
+  | "processing"
+  | "complete"
+  | "failed"
+  | "none";
+
 export interface CallHistoryEntry {
   id: string;
   number: string;
@@ -8,6 +15,8 @@ export interface CallHistoryEntry {
   recordingUrl?: string;
   aiAnalysis?: AIAnalysis;
   transcript?: TranscriptEntry[];
+  transcriptStatus?: PipelineStatus;
+  aiStatus?: PipelineStatus;
 }
 
 export interface AIAnalysis {

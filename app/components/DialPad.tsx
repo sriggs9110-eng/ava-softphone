@@ -28,10 +28,16 @@ interface DialPadProps {
   onCall: (number: string) => void;
   recentNumbers: string[];
   disabled?: boolean;
+  initialNumber?: string;
 }
 
-export default function DialPad({ onCall, recentNumbers, disabled }: DialPadProps) {
-  const [number, setNumber] = useState("+1");
+export default function DialPad({
+  onCall,
+  recentNumbers,
+  disabled,
+  initialNumber,
+}: DialPadProps) {
+  const [number, setNumber] = useState(initialNumber || "+1");
   const [showRecents, setShowRecents] = useState(false);
 
   const handleKey = useCallback((key: string) => {
