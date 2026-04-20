@@ -12,13 +12,18 @@ interface Prefs {
   signal_webhook_url: string | null;
   auto_dial_popup: boolean;
   auto_analyze_calls: boolean;
+  weekly_digest_enabled: boolean;
+  daily_summary_enabled: boolean;
 }
 
 export default function IntegrationsTab({ user }: Props) {
+  const isManager = user.role === "manager" || user.role === "admin";
   const [prefs, setPrefs] = useState<Prefs>({
     signal_webhook_url: user.signal_webhook_url ?? null,
     auto_dial_popup: user.auto_dial_popup ?? false,
     auto_analyze_calls: user.auto_analyze_calls ?? true,
+    weekly_digest_enabled: true,
+    daily_summary_enabled: false,
   });
   const [webhookInput, setWebhookInput] = useState<string>(
     user.signal_webhook_url ?? ""
@@ -73,7 +78,13 @@ export default function IntegrationsTab({ user }: Props) {
     }
   };
 
-  const toggle = async (key: "auto_dial_popup" | "auto_analyze_calls") => {
+  const toggle = async (
+    key:
+      | "auto_dial_popup"
+      | "auto_analyze_calls"
+      | "weekly_digest_enabled"
+      | "daily_summary_enabled"
+  ) => {
     const next = !prefs[key];
     setPrefs((p) => ({ ...p, [key]: next }));
     const ok = await save({ [key]: next });
@@ -144,6 +155,33 @@ export default function IntegrationsTab({ user }: Props) {
         </div>
       </div>
 
+      {isManager && (
+        <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-6 shadow-pop-md">
+          <h3 className="text-xl font-semibold text-navy font-display mb-1">
+            Email preferences
+          </h3>
+          <p className="text-[13px] text-navy-2 mb-5">
+            Pepper can email you a Monday morning briefing with team highlights
+            and picks.
+          </p>
+          <div className="divide-y-2 divide-navy/10">
+            <PrefRow
+              title="Weekly manager digest"
+              description="Mondays at 9am CT. Team call volume, answer rate, Pepper's Pick, and a coaching opportunity."
+              on={prefs.weekly_digest_enabled}
+              onChange={() => toggle("weekly_digest_enabled")}
+            />
+            <PrefRow
+              title="Daily personal summary"
+              description="Every morning: your calls from yesterday with a short coach's note."
+              on={prefs.daily_summary_enabled}
+              onChange={() => toggle("daily_summary_enabled")}
+              comingSoon
+            />
+          </div>
+        </div>
+      )}
+
       <div className="bg-cream-2 border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
         <h4 className="text-base font-semibold text-navy font-display mb-1">
           Pop-up URL shape
@@ -169,26 +207,36 @@ function PrefRow({
   description,
   on,
   onChange,
+  comingSoon,
 }: {
   title: string;
   description: string;
   on: boolean;
   onChange: () => void;
+  comingSoon?: boolean;
 }) {
   return (
     <div className="flex items-start gap-4 py-4 first:pt-0 last:pb-0">
       <div className="flex-1 min-w-0">
-        <p className="text-[14px] font-semibold text-navy">{title}</p>
+        <div className="flex items-center gap-2">
+          <p className="text-[14px] font-semibold text-navy">{title}</p>
+          {comingSoon && (
+            <span className="px-2 py-0.5 rounded-full bg-sky border-[1.5px] border-navy text-[10px] font-bold uppercase tracking-wider text-navy">
+              Coming soon
+            </span>
+          )}
+        </div>
         <p className="text-[12px] text-slate mt-0.5">{description}</p>
       </div>
       <button
         role="switch"
         aria-checked={on}
         aria-label={title}
-        onClick={onChange}
+        onClick={comingSoon ? undefined : onChange}
+        disabled={comingSoon}
         className={`relative shrink-0 w-12 h-[26px] rounded-full border-[2px] border-navy transition-colors ${
-          on ? "bg-leaf" : "bg-paper"
-        }`}
+          comingSoon ? "opacity-40 cursor-not-allowed" : ""
+        } ${on ? "bg-leaf" : "bg-paper"}`}
       >
         <span
           className={`absolute top-[1px] w-[18px] h-[18px] rounded-full border-[1.5px] border-navy transition-all ${

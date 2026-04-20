@@ -6,6 +6,8 @@ type Prefs = {
   signal_webhook_url?: string | null;
   auto_dial_popup?: boolean;
   auto_analyze_calls?: boolean;
+  weekly_digest_enabled?: boolean;
+  daily_summary_enabled?: boolean;
 };
 
 function sanitize(input: unknown): Prefs {
@@ -32,6 +34,12 @@ function sanitize(input: unknown): Prefs {
   if (typeof src.auto_analyze_calls === "boolean") {
     out.auto_analyze_calls = src.auto_analyze_calls;
   }
+  if (typeof src.weekly_digest_enabled === "boolean") {
+    out.weekly_digest_enabled = src.weekly_digest_enabled;
+  }
+  if (typeof src.daily_summary_enabled === "boolean") {
+    out.daily_summary_enabled = src.daily_summary_enabled;
+  }
   return out;
 }
 
@@ -46,7 +54,9 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("softphone_users")
-    .select("signal_webhook_url, auto_dial_popup, auto_analyze_calls")
+    .select(
+      "signal_webhook_url, auto_dial_popup, auto_analyze_calls, weekly_digest_enabled, daily_summary_enabled"
+    )
     .eq("id", user.id)
     .single();
 
@@ -58,6 +68,8 @@ export async function GET() {
     signal_webhook_url: data?.signal_webhook_url ?? null,
     auto_dial_popup: data?.auto_dial_popup ?? false,
     auto_analyze_calls: data?.auto_analyze_calls ?? true,
+    weekly_digest_enabled: data?.weekly_digest_enabled ?? true,
+    daily_summary_enabled: data?.daily_summary_enabled ?? false,
   });
 }
 

@@ -8,6 +8,15 @@ import {
   Download,
   Loader2,
   RefreshCw,
+  Play,
+  ChevronDown,
+  ChevronRight,
+  AlertTriangle,
+  TrendingUp,
+  TrendingDown,
+  Sparkles,
+  Clock,
+  RotateCw,
 } from "lucide-react";
 import {
   BarChart,
@@ -113,11 +122,26 @@ interface ReportsResponse {
     | null;
 }
 
+interface PeppersPick {
+  pick_id: string;
+  call_log_id: string;
+  rep_name: string;
+  prospect_name: string | null;
+  prospect_company: string | null;
+  prospect_number: string;
+  duration_seconds: number;
+  ai_score: number | null;
+  category: "jump" | "drop" | "outlier" | "high_effort" | "callback";
+  pepper_headline: string;
+  pepper_reason: string;
+}
+
 export default function ReportsPage() {
-  const { user, isManager } = useAuth();
+  const { user, isManager, isAdmin } = useAuth();
   const [period, setPeriod] = useState<Period>("week");
   const [agentId, setAgentId] = useState<string>(isManager ? "all" : "me");
   const [data, setData] = useState<ReportsResponse | null>(null);
+  const [picks, setPicks] = useState<PeppersPick[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,13 +153,39 @@ export default function ReportsPage() {
     async (signal?: AbortSignal) => {
       setError(null);
       const params = new URLSearchParams({ period, agent_id: agentId });
-      const res = await fetch(`/api/reports?${params.toString()}`, { signal });
-      if (!res.ok) {
-        setError(`Failed to load (${res.status})`);
-        return;
+
+      // Reports + Pick run in parallel. Pick is slow (Claude) and the reports
+      // endpoint is fast — don't make the whole UI wait on Pick.
+      const [reportsRes, pickRes] = await Promise.allSettled([
+        fetch(`/api/reports?${params.toString()}`, { signal }),
+        // Picks only for this-week view; other periods don't get picks.
+        period === "week"
+          ? fetch(`/api/reports/peppers-pick?period=week`, { signal })
+          : Promise.resolve(null),
+      ]);
+
+      if (reportsRes.status === "fulfilled") {
+        const res = reportsRes.value;
+        if (!res.ok) {
+          setError(`Failed to load (${res.status})`);
+          return;
+        }
+        const body = (await res.json()) as ReportsResponse;
+        setData(body);
+      } else {
+        setError("Failed to load");
       }
-      const body = (await res.json()) as ReportsResponse;
-      setData(body);
+
+      if (
+        pickRes.status === "fulfilled" &&
+        pickRes.value &&
+        pickRes.value.ok
+      ) {
+        const body = (await pickRes.value.json()) as { picks: PeppersPick[] };
+        setPicks(body.picks || []);
+      } else if (period !== "week") {
+        setPicks(null);
+      }
     },
     [period, agentId]
   );
@@ -270,14 +320,11 @@ export default function ReportsPage() {
         <EmptyFull period={period} isManager={!!isManager} />
       ) : (
         <>
+          {/* Pepper's Pick — above coaching per spec. Week view only. */}
+          {period === "week" && <PeppersPickSection picks={picks} />}
+
           {/* SECTION B — volume + time + charts */}
           <SectionB data={data} />
-
-          {/* Placeholder per spec */}
-          <div className="bg-cream-3 border-[2.5px] border-dashed border-navy/40 rounded-[14px] px-4 py-3 text-[12px] text-navy-2 font-accent text-lg">
-            Pepper&rsquo;s Pick coming soon — weekly highlights your team should
-            rewatch.
-          </div>
 
           {/* SECTION C — coaching deep-dive */}
           <SectionC data={data} />
@@ -292,8 +339,319 @@ export default function ReportsPage() {
 
           {/* SECTION E — operational */}
           <SectionE data={data} />
+
+          {/* Ops-health panel — admin only */}
+          {isAdmin && (
+            <OpsHealthPanel periodStart={data.scope.period_start} periodEnd={data.scope.period_end} />
+          )}
         </>
       )}
+    </div>
+  );
+}
+
+/* ---------------- Pepper's Pick ---------------- */
+
+const CATEGORY_CHIP: Record<PeppersPick["category"], { label: string; bg: string; icon: React.ReactNode }> = {
+  jump: { label: "Score jump", bg: "bg-leaf text-white", icon: <TrendingUp size={11} /> },
+  drop: { label: "Score drop", bg: "bg-coral text-white", icon: <TrendingDown size={11} /> },
+  outlier: { label: "Outlier", bg: "bg-banana text-navy", icon: <Sparkles size={11} /> },
+  high_effort: { label: "Long haul", bg: "bg-cream-2 text-navy", icon: <Clock size={11} /> },
+  callback: { label: "Callback win", bg: "bg-sky text-navy", icon: <RotateCw size={11} /> },
+};
+
+function PeppersPickSection({ picks }: { picks: PeppersPick[] | null }) {
+  const loading = picks === null;
+  const empty = picks !== null && picks.length === 0;
+
+  return (
+    <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="w-8 h-8 rounded-full bg-banana border-2 border-navy flex items-center justify-center text-navy">
+          <Sparkles size={14} />
+        </span>
+        <h3 className="text-lg font-semibold text-navy font-display">
+          Pepper&rsquo;s Pick
+        </h3>
+        <span className="text-[11px] text-slate uppercase tracking-wider font-bold">
+          Calls worth listening to this week
+        </span>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 size={18} className="animate-spin text-slate" />
+          <span className="text-[12px] text-slate ml-2">
+            Pepper&rsquo;s picking…
+          </span>
+        </div>
+      ) : empty ? (
+        <div className="py-6 text-center">
+          <p className="text-[13px] text-slate font-accent text-lg">
+            Nothing stood out this week. Check back next Monday.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {picks!.slice(0, 3).map((p) => (
+            <PickCard key={p.pick_id} pick={p} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PickCard({ pick }: { pick: PeppersPick }) {
+  const chip = CATEGORY_CHIP[pick.category];
+  const mins = Math.round(pick.duration_seconds / 60);
+  return (
+    <a
+      href={`/?log=${pick.call_log_id}`}
+      className="bg-cream-3 border-[2.5px] border-navy rounded-[14px] p-4 shadow-pop-sm shadow-pop-hover block no-underline"
+    >
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border-[1.5px] border-navy text-[10px] font-bold uppercase tracking-wider ${chip.bg}`}
+        >
+          {chip.icon}
+          {chip.label}
+        </span>
+        {typeof pick.ai_score === "number" && (
+          <span className="text-[11px] tabular-nums font-bold text-navy bg-paper border-[1.5px] border-navy rounded-full px-2 py-0.5">
+            {pick.ai_score.toFixed(1)}/10
+          </span>
+        )}
+      </div>
+      <p className="text-[14px] font-semibold text-navy font-display leading-snug mb-1">
+        {pick.pepper_headline}
+      </p>
+      <p className="text-[12px] text-navy-2 leading-relaxed mb-3">
+        {pick.pepper_reason}
+      </p>
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-slate">
+          <span className="font-bold text-navy">{pick.rep_name}</span>
+          {" → "}
+          <span className="tabular-nums">{pick.prospect_number}</span>
+          <span className="ml-2 tabular-nums">· {mins}m</span>
+        </span>
+        <span className="inline-flex items-center gap-1 text-navy font-semibold">
+          <Play size={11} />
+          Listen
+        </span>
+      </div>
+    </a>
+  );
+}
+
+/* ---------------- Ops-health panel ---------------- */
+
+interface OpsHealthData {
+  total: number;
+  with_recording: number;
+  with_transcript: number;
+  with_ai: number;
+  transcript_failed: number;
+  ai_failed: number;
+  avg_end_to_recording_sec: number | null;
+  avg_recording_to_transcript_sec: number | null;
+  avg_transcript_to_ai_sec: number | null;
+}
+
+function OpsHealthPanel({
+  periodStart,
+  periodEnd,
+}: {
+  periodStart: string;
+  periodEnd: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<OpsHealthData | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async () => {
+    const params = new URLSearchParams({ start: periodStart, end: periodEnd });
+    const res = await fetch(`/api/reports/ops-health?${params.toString()}`);
+    if (res.ok) {
+      setData((await res.json()) as OpsHealthData);
+      setLoaded(true);
+    }
+  }, [periodStart, periodEnd]);
+
+  useEffect(() => {
+    if (open && !loaded) load();
+  }, [open, loaded, load]);
+
+  const handleRetryAll = async (kind: "transcript" | "ai") => {
+    setRetrying(true);
+    await fetch(`/api/reports/ops-health/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, start: periodStart, end: periodEnd }),
+    });
+    setRetrying(false);
+    await load();
+  };
+
+  const pct = (num: number, denom: number) =>
+    denom > 0 ? Math.round((num / denom) * 1000) / 10 : 0;
+  const transcriptPct = data ? pct(data.with_transcript, data.total) : 0;
+  const transcriptAlert = data && data.total > 0 && transcriptPct < 95;
+
+  return (
+    <div className="bg-cream-2 border-[2.5px] border-navy rounded-[18px] shadow-pop-md overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-5 py-3 text-left hover:bg-cream-3 transition-colors"
+      >
+        <span className="flex items-center gap-2">
+          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <span className="text-base font-semibold text-navy font-display">
+            Ops health
+          </span>
+          <span className="text-[11px] text-slate uppercase tracking-wider font-bold">
+            Pipeline reliability · admin only
+          </span>
+          {transcriptAlert && (
+            <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-coral text-white border-[1.5px] border-navy text-[10px] font-bold uppercase tracking-wider">
+              <AlertTriangle size={10} />
+              Below 95%
+            </span>
+          )}
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t-2 border-navy px-5 py-4 bg-paper space-y-3">
+          {!data ? (
+            <div className="flex items-center gap-2 text-slate text-[13px]">
+              <Loader2 size={14} className="animate-spin" />
+              Loading pipeline stats…
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <OpsStat label="Total calls" value={data.total.toString()} />
+                <OpsStat
+                  label="Recording"
+                  value={`${data.with_recording} (${pct(
+                    data.with_recording,
+                    data.total
+                  )}%)`}
+                />
+                <OpsStat
+                  label="Transcript"
+                  value={`${data.with_transcript} (${transcriptPct}%)`}
+                  alert={transcriptAlert || false}
+                />
+                <OpsStat
+                  label="AI analysis"
+                  value={`${data.with_ai} (${pct(data.with_ai, data.total)}%)`}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="bg-cream-3 border-2 border-navy rounded-[10px] p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-navy uppercase tracking-wider">
+                      Failed transcripts
+                    </span>
+                    <span className="text-[13px] font-bold text-navy tabular-nums">
+                      {data.transcript_failed}
+                    </span>
+                  </div>
+                  {data.transcript_failed > 0 && (
+                    <button
+                      onClick={() => handleRetryAll("transcript")}
+                      disabled={retrying}
+                      className="mt-2 px-2.5 py-1 rounded-full bg-paper border-2 border-navy text-navy text-[11px] font-bold inline-flex items-center gap-1 shadow-pop-sm"
+                    >
+                      {retrying ? <Loader2 size={10} className="animate-spin" /> : <RotateCw size={10} />}
+                      Retry all
+                    </button>
+                  )}
+                </div>
+                <div className="bg-cream-3 border-2 border-navy rounded-[10px] p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-navy uppercase tracking-wider">
+                      Failed AI analyses
+                    </span>
+                    <span className="text-[13px] font-bold text-navy tabular-nums">
+                      {data.ai_failed}
+                    </span>
+                  </div>
+                  {data.ai_failed > 0 && (
+                    <button
+                      onClick={() => handleRetryAll("ai")}
+                      disabled={retrying}
+                      className="mt-2 px-2.5 py-1 rounded-full bg-paper border-2 border-navy text-navy text-[11px] font-bold inline-flex items-center gap-1 shadow-pop-sm"
+                    >
+                      {retrying ? <Loader2 size={10} className="animate-spin" /> : <RotateCw size={10} />}
+                      Retry all
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px]">
+                <OpsTime label="Call end → recording" seconds={data.avg_end_to_recording_sec} />
+                <OpsTime label="Recording → transcript" seconds={data.avg_recording_to_transcript_sec} />
+                <OpsTime label="Transcript → AI" seconds={data.avg_transcript_to_ai_sec} />
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OpsStat({
+  label,
+  value,
+  alert,
+}: {
+  label: string;
+  value: string;
+  alert?: boolean;
+}) {
+  return (
+    <div
+      className={`border-2 border-navy rounded-[10px] p-3 ${
+        alert ? "bg-rose" : "bg-cream-3"
+      }`}
+    >
+      <p className="text-[10px] text-navy uppercase tracking-wider font-bold">
+        {label}
+      </p>
+      <p className="text-[16px] font-bold text-navy tabular-nums mt-0.5">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function OpsTime({
+  label,
+  seconds,
+}: {
+  label: string;
+  seconds: number | null;
+}) {
+  const display =
+    seconds === null
+      ? "—"
+      : seconds < 60
+      ? `${Math.round(seconds)}s`
+      : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  return (
+    <div className="bg-cream-3 border-2 border-navy rounded-[10px] px-3 py-2">
+      <p className="text-[10px] text-navy uppercase tracking-wider font-bold">
+        {label}
+      </p>
+      <p className="text-[14px] font-bold text-navy tabular-nums">{display}</p>
     </div>
   );
 }
