@@ -17,8 +17,6 @@ import TranscriptsPage from "@/app/components/TranscriptsPage";
 import AfterCallWork from "@/app/components/AfterCallWork";
 import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
-import PepperSpiceCard from "@/components/pepper/PepperSpiceCard";
-import CoachingTogglesCard from "@/components/pepper/CoachingTogglesCard";
 import { Loader2 } from "lucide-react";
 import { insertCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
 import { CallHistoryEntry } from "@/app/lib/types";
@@ -74,7 +72,7 @@ function callLogToEntry(log: CallLog): CallHistoryEntry {
 }
 
 export default function Home() {
-  const { user, isManager, isAdmin, loading: authLoading, updateStatus } = useAuth();
+  const { user, isManager, loading: authLoading, updateStatus } = useAuth();
   const router = useRouter();
 
   const {
@@ -306,6 +304,10 @@ export default function Home() {
       <Sidebar
         activePage={activePage}
         onNavigate={(page) => {
+          if (page === "settings") {
+            router.push("/settings");
+            return;
+          }
           setActivePage(page);
         }}
         connectionStatus={connectionStatus}
@@ -464,78 +466,7 @@ export default function Home() {
             <TranscriptsPage entries={callHistory} />
           )}
 
-          {/* Settings Page */}
-          {activePage === "settings" && user && (
-            <div className="max-w-2xl space-y-5">
-              <PepperSpiceCard
-                userId={user.id}
-                initialSpice={user.pepper_spice ?? "medium"}
-              />
-              <CoachingTogglesCard initialPrefs={user.coaching_prefs ?? null} />
-
-              <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
-                <h3 className="text-base font-semibold text-navy font-display mb-2">
-                  Connection
-                </h3>
-                <div className="flex items-center gap-2">
-                  <div
-                    className={`w-2.5 h-2.5 rounded-full border border-navy ${
-                      connectionStatus === "connected"
-                        ? "bg-leaf"
-                        : connectionStatus === "connecting"
-                        ? "bg-banana"
-                        : "bg-coral"
-                    }`}
-                  />
-                  <p className="text-[14px] text-navy-2 capitalize">
-                    {connectionStatus}
-                  </p>
-                </div>
-              </div>
-
-              {isAdmin && (
-                <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
-                  <h3 className="text-base font-semibold text-navy font-display mb-2">
-                    User Management
-                  </h3>
-                  <button
-                    onClick={() => router.push("/settings/users")}
-                    className="inline-flex items-center gap-1 text-[13px] text-navy font-semibold underline underline-offset-2 decoration-2 decoration-coral"
-                  >
-                    Manage users &rarr;
-                  </button>
-                </div>
-              )}
-
-              <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
-                <h3 className="text-base font-semibold text-navy font-display mb-2">
-                  Outbound Number
-                </h3>
-                <p className="text-[14px] text-navy-2 tabular-nums">
-                  {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not configured"}
-                </p>
-              </div>
-
-              <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
-                <h3 className="text-base font-semibold text-navy font-display mb-2">
-                  Keyboard Shortcuts
-                </h3>
-                <button
-                  onClick={() => setShowShortcuts(true)}
-                  className="inline-flex items-center gap-1 text-[13px] text-navy font-semibold underline underline-offset-2 decoration-2 decoration-coral"
-                >
-                  View all shortcuts
-                </button>
-              </div>
-
-              <div className="bg-cream-2 border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md">
-                <h3 className="text-base font-semibold text-navy font-display mb-1">
-                  Version
-                </h3>
-                <p className="text-[12px] text-slate">Pepper v0.5.0</p>
-              </div>
-            </div>
-          )}
+          {/* Settings lives at /settings now — see sidebar nav. */}
         </div>
       </main>
 

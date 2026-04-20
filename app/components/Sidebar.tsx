@@ -75,7 +75,7 @@ export default function Sidebar({
   packetLoss,
   onShowShortcuts,
 }: SidebarProps) {
-  const { user, isManager, isAdmin, logout } = useAuth();
+  const { user, isManager, logout } = useAuth();
 
   const navItems: { page: NavPage; icon: typeof Phone; label: string }[] = [
     { page: "phone", icon: Phone, label: "Phone" },
@@ -130,31 +130,29 @@ export default function Sidebar({
       {/* Divider */}
       <div className="w-6 h-px bg-white/20 my-2" />
 
-      {/* Settings — admin only */}
-      {isAdmin && (
-        <button
-          onClick={() => onNavigate("settings")}
-          className={`group relative w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-150 ${
-            activePage === "settings"
-              ? "bg-banana text-navy"
-              : "text-white/50 hover:text-white hover:bg-navy-2"
-          }`}
-        >
-          {activePage === "settings" && (
-            <span
-              className="absolute -left-[12px] top-1.5 bottom-1.5 w-1 rounded-r bg-coral"
-              aria-hidden
-            />
-          )}
-          <Settings size={20} strokeWidth={2.25} />
-          <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-navy border-2 border-banana rounded-lg text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-            Settings
-          </div>
-        </button>
-      )}
-
       {/* Spacer */}
       <div className="flex-1" />
+
+      {/* Settings — visible to all roles; personal prefs live here */}
+      <button
+        onClick={() => onNavigate("settings")}
+        className={`group relative w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-150 ${
+          activePage === "settings"
+            ? "bg-banana text-navy"
+            : "text-white/50 hover:text-white hover:bg-navy-2"
+        }`}
+      >
+        {activePage === "settings" && (
+          <span
+            className="absolute -left-[12px] top-1.5 bottom-1.5 w-1 rounded-r bg-coral"
+            aria-hidden
+          />
+        )}
+        <Settings size={20} strokeWidth={2.25} />
+        <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-navy border-2 border-banana rounded-lg text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
+          Settings
+        </div>
+      </button>
 
       {/* User Info + Agent Status */}
       <UserMenu
