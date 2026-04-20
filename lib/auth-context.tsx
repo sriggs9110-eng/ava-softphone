@@ -68,14 +68,59 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const { data, error } = await supabase
-      .from("softphone_users")
-      .select("id, email, full_name, role, extension, status, pepper_spice, coaching_prefs")
-      .eq("id", authUser.id)
-      .single();
+    // Try the full select first. If the Pepper migrations haven't been
+    // applied, columns like `pepper_spice` / `coaching_prefs` won't exist and
+    // PostgREST returns a 400. Retry with core columns so the user can still
+    // sign in — otherwise auth silently fails and /settings loops to /login.
+    const fullCols =
+      "id, email, full_name, role, extension, status, pepper_spice, coaching_prefs";
+    const coreCols = "id, email, full_name, role, extension, status";
+
+    let data: Partial<SoftphoneUser> | null = null;
+    let error: { message: string } | null = null;
+
+    {
+      const full = await supabase
+        .from("softphone_users")
+        .select(fullCols)
+        .eq("id", authUser.id)
+        .single();
+      data = full.data as Partial<SoftphoneUser> | null;
+      error = full.error;
+    }
 
     if (error) {
-      console.error("[AuthContext] Failed to fetch softphone_users row:", error);
+      console.warn(
+        "[AuthContext] Full select failed, falling back to core columns:",
+        error.message
+      );
+      const retry = await supabase
+        .from("softphone_users")
+        .select(coreCols)
+        .eq("id", authUser.id)
+        .single();
+      data = retry.data as Partial<SoftphoneUser> | null;
+      error = retry.error;
+    }
+
+    if (error) {
+      console.error(
+        "[AuthContext] softphone_users row unreachable; synthesizing minimal user:",
+        error.message
+      );
+      // Middleware has already authenticated us. Fall back to a minimal
+      // user object so UI that keys off user.id doesn't fail. Role defaults
+      // to "agent" — admin features will hide themselves.
+      setUser({
+        id: authUser.id,
+        email: authUser.email ?? "",
+        full_name: authUser.email?.split("@")[0] ?? "user",
+        role: "agent",
+        extension: null,
+        status: "available",
+      });
+      setLoading(false);
+      return;
     }
 
     if (data) {

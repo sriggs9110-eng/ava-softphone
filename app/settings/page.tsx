@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Loader2,
@@ -43,13 +42,12 @@ const TABS: TabDef[] = [
 
 export default function SettingsPage() {
   const { user, isAdmin, loading: authLoading } = useAuth();
-  const router = useRouter();
   const [tab, setTab] = useState<Tab>("your-pepper");
 
-  useEffect(() => {
-    if (!authLoading && !user) router.push("/login");
-  }, [authLoading, user, router]);
-
+  // No client-side /login redirect here — middleware already guarded the
+  // route. If user is still null after loading, AuthContext synthesized a
+  // minimal user (see lib/auth-context.tsx), so we wait on that rather than
+  // bouncing to /login and creating a loop.
   if (authLoading || !user) {
     return (
       <div className="min-h-screen bg-cream flex items-center justify-center">
