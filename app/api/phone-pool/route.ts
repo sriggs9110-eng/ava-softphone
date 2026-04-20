@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
 // Authenticated read-only endpoint for the active pool.
-// Used by the client-side local-presence module (cached 60s per client).
+// Used by the client-side local-presence module. We explicitly disable any
+// HTTP-layer caching so admin writes to phone_number_pool are visible on
+// the next client fetch without waiting for a TTL.
 export async function GET() {
   const supabase = await createClient();
   const {
@@ -21,7 +23,18 @@ export async function GET() {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json(data || [], {
-    headers: { "Cache-Control": "private, max-age=30" },
+  const rows = data || [];
+  console.log(
+    "[/api/phone-pool] returning rows:",
+    rows.map((r) => ({
+      phone_number: r.phone_number,
+      area_code: r.area_code,
+      area_code_len: (r.area_code as string | null)?.length,
+      is_active: r.is_active,
+    }))
+  );
+
+  return NextResponse.json(rows, {
+    headers: { "Cache-Control": "no-store" },
   });
 }

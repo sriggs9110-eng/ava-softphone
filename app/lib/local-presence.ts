@@ -1,8 +1,12 @@
 // Local-presence outbound dialing: pick a `from` number whose area code
 // matches the prospect's area code. Pool is stored in phone_number_pool.
 //
-// Cache the full active pool in-memory for 60 seconds. Works on both
+// Cache the full active pool in-memory with a short TTL. Works on both
 // server (reads directly via Supabase) and client (reads via /api/phone-pool).
+//
+// Logs are intentionally permanent. On the server they land in Vercel logs;
+// on the client they surface in the browser console during a dial, which is
+// where you need them when debugging why a rep's call picked the wrong CID.
 
 type PoolRow = {
   id: string;
@@ -16,12 +20,14 @@ type CacheEntry = {
   fetchedAt: number;
 };
 
-const CACHE_TTL_MS = 60_000;
+// 10s TTL bounds worst-case staleness after an admin adds or toggles a
+// number. Browser tabs that pre-date the change will pick up the new row
+// within ~10s without a hard reload.
+const CACHE_TTL_MS = 10_000;
 let cache: CacheEntry | null = null;
 let inFlight: Promise<PoolRow[]> | null = null;
 
 function defaultFromNumber(): string {
-  // Both env var names supported; NEXT_PUBLIC_ is readable client-side.
   const fallback =
     (typeof window !== "undefined"
       ? process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER
@@ -38,20 +44,30 @@ function extractAreaCode(raw: string): string | null {
   return null;
 }
 
+function normalizeAreaCode(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    if (typeof raw === "number") return String(raw).padStart(3, "0");
+    return null;
+  }
+  // Guard against stored values that slipped through as "251 ", "+1251",
+  // or similar by stripping non-digits and taking the last 3.
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return null;
+  return digits.slice(-3);
+}
+
 async function fetchPool(): Promise<PoolRow[]> {
   if (typeof window === "undefined") {
-    // Server path — use service role if available, else anon via ssr client.
-    // We avoid importing admin here to keep this module usable from the webhook
-    // context without cookies; callers that don't have auth can still read
-    // the active pool via the RLS "agents read pool" policy with any auth token,
-    // OR via service role. For simplicity on the server, use service role when
-    // available since local-presence runs during outbound call creation.
+    // Server path — uses service role when available.
     const { createClient } = await import("@supabase/supabase-js");
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const key =
       process.env.SUPABASE_SERVICE_ROLE_KEY ||
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (!url || !key) return [];
+    if (!url || !key) {
+      console.warn("[local-presence] no SUPABASE creds — returning empty pool");
+      return [];
+    }
 
     const admin = createClient(url, key, {
       auth: { autoRefreshToken: false, persistSession: false },
@@ -64,24 +80,49 @@ async function fetchPool(): Promise<PoolRow[]> {
       console.error("[local-presence] server fetch failed:", error.message);
       return [];
     }
-    return (data as PoolRow[]) || [];
+    const rows = (data as PoolRow[]) || [];
+    console.log(
+      "[local-presence] server pool rows:",
+      rows.map((r) => ({
+        phone_number: r.phone_number,
+        area_code: r.area_code,
+        area_code_len: r.area_code?.length,
+        is_active: r.is_active,
+      }))
+    );
+    return rows;
   }
 
   // Client path
   try {
     const res = await fetch("/api/phone-pool", { cache: "no-store" });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      console.warn("[local-presence] /api/phone-pool status", res.status);
+      return [];
+    }
     const data = (await res.json()) as PoolRow[];
-    return data || [];
+    const rows = data || [];
+    console.log(
+      "[local-presence] client pool rows:",
+      rows.map((r) => ({
+        phone_number: r.phone_number,
+        area_code: r.area_code,
+        area_code_len: r.area_code?.length,
+        is_active: r.is_active,
+      }))
+    );
+    return rows;
   } catch (err) {
     console.error("[local-presence] client fetch failed:", err);
     return [];
   }
 }
 
-async function getPool(): Promise<PoolRow[]> {
+async function getPool(forceRefresh = false): Promise<PoolRow[]> {
   const now = Date.now();
-  if (cache && now - cache.fetchedAt < CACHE_TTL_MS) return cache.rows;
+  if (!forceRefresh && cache && now - cache.fetchedAt < CACHE_TTL_MS) {
+    return cache.rows;
+  }
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
@@ -99,15 +140,47 @@ async function getPool(): Promise<PoolRow[]> {
 
 export async function getLocalNumber(prospectPhone: string): Promise<string> {
   const fallback = defaultFromNumber();
-  const area = extractAreaCode(prospectPhone);
-  if (!area) return fallback;
+  console.log("[local-presence] input:", prospectPhone);
 
-  const pool = await getPool();
-  const match = pool.find((p) => p.area_code === area && p.is_active);
-  return match?.phone_number || fallback;
+  const area = extractAreaCode(prospectPhone);
+  console.log("[local-presence] extracted area code:", area);
+
+  if (!area) {
+    console.log("[local-presence] no area code — falling back to default:", fallback);
+    return fallback;
+  }
+
+  let pool = await getPool();
+  let matches = pool.filter(
+    (p) => normalizeAreaCode(p.area_code) === area && p.is_active
+  );
+  console.log(
+    "[local-presence] pool matches:",
+    matches.map((m) => m.phone_number)
+  );
+
+  // Retry once on miss: the in-memory cache may be stale if an admin added a
+  // new number after this tab loaded. One forced refresh covers that without
+  // extra traffic on the happy path.
+  if (matches.length === 0) {
+    console.log("[local-presence] miss — forcing cache refresh and retrying");
+    pool = await getPool(true);
+    matches = pool.filter(
+      (p) => normalizeAreaCode(p.area_code) === area && p.is_active
+    );
+    console.log(
+      "[local-presence] pool matches (after refresh):",
+      matches.map((m) => m.phone_number)
+    );
+  }
+
+  const selected = matches[0]?.phone_number || fallback;
+  console.log("[local-presence] selected:", selected);
+  return selected;
 }
 
 /** Forces the next getLocalNumber() call to re-fetch the pool. Call after admin writes. */
 export function invalidatePoolCache() {
   cache = null;
+  console.log("[local-presence] cache invalidated");
 }
