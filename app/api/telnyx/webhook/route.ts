@@ -249,11 +249,22 @@ export async function POST(req: NextRequest) {
       let row = await findRecentCall(payload);
 
       if (row) {
+        // Capture Telnyx's view of From/To too — previously these only wrote on
+        // the insert branch, leaving from_number=null on existing rows.
+        // This is what Telnyx actually put on the wire, so it's the ground
+        // truth for diagnosing local-presence CID overrides.
+        const telnyxDir = payload?.direction as string | undefined;
+        const telnyxIsOutgoing =
+          telnyxDir === "outgoing" || telnyxDir === "outbound";
+        const telnyxFrom = telnyxIsOutgoing ? from : to;
+        console.log(
+          `[Webhook] initiated — row ${row.id} telnyx-from=${telnyxFrom} direction=${telnyxDir}`
+        );
         await updateRow(row.id, {
           call_control_id: ccid,
           call_session_id: sessionId,
+          from_number: telnyxFrom || null,
         });
-        console.log(`[Webhook] initiated — linked to row ${row.id}`);
       } else {
         const dir = payload?.direction as string;
         const prospectNumber = dir === "outbound" ? to : from;
