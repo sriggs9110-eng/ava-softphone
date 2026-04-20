@@ -69,6 +69,7 @@ function callLogToEntry(log: CallLog): CallHistoryEntry {
     aiAnalysis: parsedAnalysis,
     transcript: parsedTranscript,
     transcriptStatus: log.transcript_status ?? undefined,
+    transcriptError: log.transcript_error ?? undefined,
     aiStatus: log.ai_status ?? undefined,
   };
 }

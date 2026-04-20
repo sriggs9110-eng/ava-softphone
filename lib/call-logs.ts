@@ -15,15 +15,17 @@ export interface CallLog {
   status: string;
   duration_seconds: number;
   recording_url: string | null;
+  recording_id?: string | null;
   call_control_id: string | null;
   call_session_id: string | null;
   from_number: string | null;
   transcript: string | null;
   transcript_status?: PipelineStatus | null;
+  transcript_error?: string | null;
   ai_summary: string | null;
   ai_score: number | null;
   ai_analysis: Record<string, unknown> | null;
-  ai_status?: PipelineStatus | null;
+  ai_status?: PipelineStatus | "skipped_no_transcript" | null;
   notes: string | null;
   created_at: string;
   // Joined fields

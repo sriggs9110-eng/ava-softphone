@@ -256,30 +256,11 @@ export default function CallHistoryPage({
                     {entry.aiAnalysis ? (
                       <AIAnalysisView analysis={entry.aiAnalysis} />
                     ) : (
-                      <div className="space-y-2">
-                        {!entry.recordingUrl && entry.status === "completed" && (
-                          <p className="text-[12px] text-amber px-1">
-                            Recording not available yet. It may take up to 60 seconds after the call ends.
-                          </p>
-                        )}
-                        <button
-                          onClick={() => handleAnalyze(entry)}
-                          disabled={analyzingId === entry.id}
-                          className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px]"
-                        >
-                          {analyzingId === entry.id ? (
-                            <>
-                              <Loader2 size={16} className="animate-spin" />
-                              {entry.recordingUrl ? "Transcribing & Analyzing..." : "Analyzing..."}
-                            </>
-                          ) : (
-                            <>
-                              <TrendingUp size={16} />
-                              {entry.recordingUrl ? "Transcribe & Analyze with AI" : "Analyze with AI (metadata only)"}
-                            </>
-                          )}
-                        </button>
-                      </div>
+                      <PipelineFailureOrAnalyze
+                        entry={entry}
+                        loading={analyzingId === entry.id}
+                        onAnalyze={() => handleAnalyze(entry)}
+                      />
                     )}
 
                     {/* Dial button */}
@@ -461,6 +442,94 @@ function formatCallDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function PipelineFailureOrAnalyze({
+  entry,
+  loading,
+  onAnalyze,
+}: {
+  entry: CallHistoryEntry;
+  loading: boolean;
+  onAnalyze: () => void;
+}) {
+  const tStatus = entry.transcriptStatus;
+  const aStatus = entry.aiStatus;
+  const showRetry =
+    tStatus === "failed" ||
+    aStatus === "failed" ||
+    aStatus === "skipped_no_transcript";
+
+  let message: string | null = null;
+  if (aStatus === "skipped_no_transcript") {
+    message =
+      "Transcription didn't land — no coaching available for this call.";
+  } else if (tStatus === "failed") {
+    message = entry.transcriptError
+      ? `Transcription failed: ${entry.transcriptError}`
+      : "Transcription failed.";
+  } else if (aStatus === "failed") {
+    message = "AI analysis failed. Click below to retry.";
+  }
+
+  if (showRetry) {
+    return (
+      <div className="space-y-2">
+        <div className="bg-rose border-2 border-navy rounded-[10px] p-3 text-[13px] text-navy">
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <p className="leading-snug">{message}</p>
+          </div>
+        </div>
+        <button
+          onClick={onAnalyze}
+          disabled={loading}
+          className="w-full py-3 rounded-full bg-banana border-[2.5px] border-navy text-navy text-sm font-bold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px] shadow-pop-sm shadow-pop-hover"
+        >
+          {loading ? (
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              Retrying…
+            </>
+          ) : (
+            <>
+              <RotateCw size={16} />
+              Retry transcription
+            </>
+          )}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {!entry.recordingUrl && entry.status === "completed" && (
+        <p className="text-[12px] text-amber px-1">
+          Recording not available yet. It may take up to 60 seconds after the call ends.
+        </p>
+      )}
+      <button
+        onClick={onAnalyze}
+        disabled={loading}
+        className="w-full py-3 rounded-full bg-banana border-[2.5px] border-navy text-navy text-sm font-bold transition-all duration-150 disabled:opacity-50 flex items-center justify-center gap-2 min-h-[44px] shadow-pop-sm shadow-pop-hover"
+      >
+        {loading ? (
+          <>
+            <Loader2 size={16} className="animate-spin" />
+            {entry.recordingUrl ? "Transcribing & Analyzing…" : "Analyzing…"}
+          </>
+        ) : (
+          <>
+            <TrendingUp size={16} />
+            {entry.recordingUrl
+              ? "Transcribe & Analyze with AI"
+              : "Analyze with AI (metadata only)"}
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
+
 function PipelineStatusControl({
   entry,
   loading,
@@ -483,17 +552,25 @@ function PipelineStatusControl({
     );
   }
 
-  const failed = tStatus === "failed" || aStatus === "failed";
-  if (failed) {
+  const needsRetry =
+    tStatus === "failed" ||
+    aStatus === "failed" ||
+    aStatus === "skipped_no_transcript";
+
+  if (needsRetry) {
+    const title =
+      tStatus === "failed"
+        ? entry.transcriptError
+          ? `Transcription failed: ${entry.transcriptError}`
+          : "Transcription failed — click to retry"
+        : aStatus === "skipped_no_transcript"
+        ? "No transcript — coaching skipped. Click to retry transcription."
+        : "Analysis failed — click to retry";
     return (
       <button
         onClick={onAnalyze}
         disabled={loading}
-        title={
-          tStatus === "failed"
-            ? "Transcription failed — click to retry"
-            : "Analysis failed — click to retry"
-        }
+        title={title}
         className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-rose border-2 border-navy text-navy text-[11px] font-bold uppercase tracking-wider disabled:opacity-50 shadow-pop-sm shadow-pop-hover"
       >
         {loading ? (

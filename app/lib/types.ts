@@ -5,6 +5,8 @@ export type PipelineStatus =
   | "failed"
   | "none";
 
+export type AiStatus = PipelineStatus | "skipped_no_transcript";
+
 export interface CallHistoryEntry {
   id: string;
   number: string;
@@ -16,7 +18,8 @@ export interface CallHistoryEntry {
   aiAnalysis?: AIAnalysis;
   transcript?: TranscriptEntry[];
   transcriptStatus?: PipelineStatus;
-  aiStatus?: PipelineStatus;
+  transcriptError?: string | null;
+  aiStatus?: AiStatus;
 }
 
 export interface AIAnalysis {

@@ -308,10 +308,26 @@ export async function POST(req: NextRequest) {
               body: JSON.stringify({ format: "mp3", channels: "dual" }),
             }
           );
-          console.log(`[Webhook] record_start: ${res.status}`);
+          if (!res.ok) {
+            const errText = await res.text().catch(() => "");
+            console.error(
+              `[Webhook] record_start FAILED ${res.status} ccid=${ccid} direction=${payload?.direction} body=${errText.slice(0, 400)}`
+            );
+          } else {
+            console.log(
+              `[Webhook] record_start ok ccid=${ccid} direction=${payload?.direction}`
+            );
+          }
         } catch (err) {
-          console.error("[Webhook] record_start failed:", err);
+          console.error(
+            `[Webhook] record_start threw ccid=${ccid}:`,
+            (err as Error).message
+          );
         }
+      } else if (!apiKey) {
+        console.warn("[Webhook] TELNYX_API_KEY missing — recording disabled");
+      } else {
+        console.warn("[Webhook] call.answered without ccid — cannot start recording");
       }
 
       const row = await findRecentCall(payload);
@@ -361,7 +377,12 @@ export async function POST(req: NextRequest) {
       const urls = payload?.recording_urls as Record<string, string> | undefined;
       const url = urls?.mp3 || urls?.wav;
       const recSessionId = payload?.call_session_id as string | undefined;
-      console.log(`[Webhook] Recording url=${url} ccid=${ccid} session=${recSessionId} from=${from} to=${to}`);
+      const recordingId = (payload?.recording_id ||
+        payload?.id ||
+        (payload as Record<string, unknown>)?.public_recording_id) as string | undefined;
+      console.log(
+        `[Webhook] Recording url=${url} recording_id=${recordingId} ccid=${ccid} session=${recSessionId} from=${from} to=${to}`
+      );
 
       if (url) {
         const admin = getAdmin();
@@ -410,8 +431,12 @@ export async function POST(req: NextRequest) {
         }
 
         if (rowId) {
-          await updateRow(rowId, { recording_url: url });
-          console.log(`[Webhook] recording saved to row ${rowId}`);
+          const update: Record<string, unknown> = { recording_url: url };
+          if (recordingId) update.recording_id = recordingId;
+          await updateRow(rowId, update);
+          console.log(
+            `[Webhook] recording saved to row ${rowId} recording_id=${recordingId}`
+          );
 
           // Auto-trigger transcription + analysis when the owner has it on
           // (default ON). Runs after the response returns so Telnyx doesn't

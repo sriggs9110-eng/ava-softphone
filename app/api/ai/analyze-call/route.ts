@@ -32,32 +32,110 @@ async function stampStatus(
   }
 }
 
-async function transcribeWithWhisper(
-  recordingUrl: string
-): Promise<string | null> {
-  const openaiKey = process.env.OPENAI_API_KEY;
-  if (!openaiKey) {
-    console.log("[AI] No OPENAI_API_KEY — skipping transcription");
+type TranscribeResult =
+  | { ok: true; transcript: string }
+  | { ok: false; error: string };
+
+/**
+ * Fetch a fresh S3-presigned URL for a Telnyx recording. Stored URLs expire
+ * after 10 minutes (X-Amz-Expires=600) — this endpoint returns a new one
+ * every time, so we always call it right before streaming the file.
+ */
+async function refreshRecordingUrl(recordingId: string): Promise<string | null> {
+  const telnyxKey = process.env.TELNYX_API_KEY;
+  if (!telnyxKey) {
+    console.warn("[AI] TELNYX_API_KEY missing — cannot refresh recording URL");
     return null;
   }
-
   try {
-    console.log("[AI] Downloading recording:", recordingUrl);
-    const audioRes = await fetch(recordingUrl);
-    if (!audioRes.ok) {
-      console.error("[AI] Failed to download recording:", audioRes.status);
+    const res = await fetch(
+      `https://api.telnyx.com/v2/recordings/${encodeURIComponent(recordingId)}`,
+      { headers: { Authorization: `Bearer ${telnyxKey}` } }
+    );
+    console.log(`[AI] Telnyx recordings/${recordingId} status=${res.status}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[AI] Telnyx recording refresh failed: ${errText.slice(0, 500)}`);
       return null;
     }
+    const body = (await res.json()) as {
+      data?: { recording_urls?: { mp3?: string; wav?: string } };
+    };
+    const fresh = body?.data?.recording_urls?.mp3 || body?.data?.recording_urls?.wav;
+    return fresh || null;
+  } catch (err) {
+    console.error("[AI] Telnyx recording refresh error:", err);
+    return null;
+  }
+}
 
-    const audioBlob = await audioRes.blob();
-    console.log("[AI] Downloaded audio:", audioBlob.size, "bytes", audioBlob.type);
+async function transcribeWithWhisper(args: {
+  recordingUrl: string;
+  recordingId: string | null;
+}): Promise<TranscribeResult> {
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey) {
+    const msg = "OPENAI_API_KEY missing on server";
+    console.warn(`[AI] ${msg}`);
+    return { ok: false, error: msg };
+  }
 
-    const formData = new FormData();
-    formData.append("file", audioBlob, "recording.mp3");
-    formData.append("model", "whisper-1");
-    formData.append("response_format", "text");
+  // Always prefer a freshly signed URL when we have the recording_id — stored
+  // URLs expire 10 minutes after the webhook fires.
+  let url = args.recordingUrl;
+  if (args.recordingId) {
+    const fresh = await refreshRecordingUrl(args.recordingId);
+    if (fresh) {
+      console.log(
+        `[AI] Refreshed recording URL via Telnyx for id=${args.recordingId}`
+      );
+      url = fresh;
+    } else {
+      console.warn(
+        `[AI] Fallback: using stored URL for id=${args.recordingId} (refresh failed)`
+      );
+    }
+  } else {
+    console.warn(
+      "[AI] No recording_id persisted — using stored URL (may be expired)"
+    );
+  }
 
-    const whisperRes = await fetch(
+  console.log("[AI] Downloading recording:", url.slice(0, 120) + "…");
+  let audioRes: Response;
+  try {
+    audioRes = await fetch(url);
+  } catch (err) {
+    const msg = `recording fetch threw: ${(err as Error).message}`;
+    console.error("[AI]", msg);
+    return { ok: false, error: msg };
+  }
+
+  if (!audioRes.ok) {
+    const errText = await audioRes.text().catch(() => "");
+    const msg = `recording download ${audioRes.status}${
+      errText ? `: ${errText.slice(0, 400)}` : ""
+    }`;
+    console.error("[AI]", msg);
+    return { ok: false, error: msg };
+  }
+
+  const audioBlob = await audioRes.blob();
+  console.log(
+    `[AI] Downloaded audio: ${audioBlob.size} bytes ${audioBlob.type}`
+  );
+  if (audioBlob.size === 0) {
+    return { ok: false, error: "downloaded recording is 0 bytes" };
+  }
+
+  const formData = new FormData();
+  formData.append("file", audioBlob, "recording.mp3");
+  formData.append("model", "whisper-1");
+  formData.append("response_format", "text");
+
+  let whisperRes: Response;
+  try {
+    whisperRes = await fetch(
       "https://api.openai.com/v1/audio/transcriptions",
       {
         method: "POST",
@@ -65,20 +143,27 @@ async function transcribeWithWhisper(
         body: formData,
       }
     );
-
-    if (!whisperRes.ok) {
-      const errText = await whisperRes.text();
-      console.error("[AI] Whisper error:", whisperRes.status, errText);
-      return null;
-    }
-
-    const transcript = await whisperRes.text();
-    console.log("[AI] Whisper transcript length:", transcript.length);
-    return transcript.trim();
   } catch (err) {
-    console.error("[AI] Transcription error:", err);
-    return null;
+    const msg = `whisper request threw: ${(err as Error).message}`;
+    console.error("[AI]", msg);
+    return { ok: false, error: msg };
   }
+
+  if (!whisperRes.ok) {
+    const errText = await whisperRes.text().catch(() => "");
+    const msg = `whisper ${whisperRes.status}${
+      errText ? `: ${errText.slice(0, 400)}` : ""
+    }`;
+    console.error("[AI]", msg);
+    return { ok: false, error: msg };
+  }
+
+  const transcript = (await whisperRes.text()).trim();
+  console.log(`[AI] Whisper transcript length: ${transcript.length}`);
+  if (transcript.length === 0) {
+    return { ok: false, error: "whisper returned empty transcript" };
+  }
+  return { ok: true, transcript };
 }
 
 /**
@@ -156,16 +241,30 @@ function areaCodeOf(phone: string | null | undefined): string | null {
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { recording_url, call_metadata, call_log_id } = body;
+  const {
+    recording_url,
+    call_metadata,
+    call_log_id,
+    recording_id: bodyRecordingId,
+  } = body;
 
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
-  if (!anthropicKey) {
-    await stampStatus(call_log_id, { ai_status: "failed" });
-    return NextResponse.json(
-      { error: "Anthropic API key not configured" },
-      { status: 500 }
-    );
+  // Allow refreshing by pulling recording_id from the row when the caller
+  // didn't pass it (the webhook auto-trigger doesn't include it today).
+  let recordingId: string | null = bodyRecordingId ?? null;
+  if (!recordingId && call_log_id) {
+    try {
+      const admin = getAdmin();
+      const { data } = await admin
+        .from("call_logs")
+        .select("recording_id")
+        .eq("id", call_log_id)
+        .single();
+      recordingId = (data?.recording_id as string | null) ?? null;
+    } catch {
+      // noop — we'll fall back to the stored URL
+    }
   }
 
   const hasRecording = !!recording_url;
@@ -193,17 +292,29 @@ export async function POST(req: NextRequest) {
 
   // Transcription phase
   if (hasRecording && !transcript) {
-    await stampStatus(call_log_id, { transcript_status: "processing" });
-    transcript = await transcribeWithWhisper(recording_url);
-
-    if (transcript && call_log_id) {
+    await stampStatus(call_log_id, {
+      transcript_status: "processing",
+      transcript_error: null,
+    });
+    const result = await transcribeWithWhisper({
+      recordingUrl: recording_url,
+      recordingId,
+    });
+    if (result.ok) {
+      transcript = result.transcript;
+      if (call_log_id) {
+        await stampStatus(call_log_id, {
+          transcript,
+          transcript_status: "complete",
+          transcript_error: null,
+        });
+        console.log("[AI] Saved transcript to call_logs");
+      }
+    } else if (call_log_id) {
       await stampStatus(call_log_id, {
-        transcript,
-        transcript_status: "complete",
+        transcript_status: "failed",
+        transcript_error: result.error.slice(0, 1000),
       });
-      console.log("[AI] Saved transcript to call_logs");
-    } else if (!transcript && call_log_id) {
-      await stampStatus(call_log_id, { transcript_status: "failed" });
     }
   } else if (!hasRecording && call_log_id && !transcript) {
     await stampStatus(call_log_id, { transcript_status: "none" });
@@ -213,21 +324,35 @@ export async function POST(req: NextRequest) {
 
   const hasTranscript = !!transcript;
 
-  let analysisContext: string;
-  if (hasTranscript) {
-    analysisContext = `Full transcript of the conversation:\n${transcript}`;
-  } else if (hasRecording) {
-    analysisContext = `A recording exists but transcription was not available. The call lasted ${duration} seconds. Analyze based on call metadata — duration and direction confirm a real conversation. Do NOT label this as "estimated."`;
-  } else {
-    analysisContext = `No transcript or recording available. Analyze based on the call metadata only. Begin the summary with "⚡ Estimated — " to indicate this is metadata-only.`;
+  // Gate AI on transcript success. Coaching without the actual conversation
+  // produces confident generic advice — worse than nothing. Spec option A.
+  if (!hasTranscript) {
+    if (call_log_id) {
+      await stampStatus(call_log_id, { ai_status: "skipped_no_transcript" });
+    }
+    return NextResponse.json(
+      {
+        skipped: "no_transcript",
+        reason:
+          "Transcription didn't land — coaching requires the actual conversation, not metadata.",
+      },
+      { status: 200 }
+    );
   }
 
-  const hasRealContent = hasTranscript;
+  if (!anthropicKey) {
+    await stampStatus(call_log_id, { ai_status: "failed" });
+    return NextResponse.json(
+      { error: "Anthropic API key not configured" },
+      { status: 500 }
+    );
+  }
+
+  const analysisContext = `Full transcript of the conversation:\n${transcript}`;
 
   const taxonomy = OBJECTION_TAXONOMY.join('", "');
 
-  const systemPrompt = hasRealContent
-    ? `You are a sales call analyst for Ava Residential, a B2B inside sales team at an ISP reseller. Analyze this transcript and return ONLY a valid JSON object with:
+  const systemPrompt = `You are a sales call analyst for Ava Residential, a B2B inside sales team at an ISP reseller. Analyze this transcript and return ONLY a valid JSON object with:
 - summary: 3-4 sentences based on the actual conversation
 - score: number 1-10 (qualifying, objection handling, next steps, professionalism)
 - score_reasoning: why this score, referencing specifics from the call
@@ -243,25 +368,7 @@ export async function POST(req: NextRequest) {
 - interruption_count: int — times the rep cut off the prospect mid-sentence
 - objection_tags: array of strings drawn ONLY from this taxonomy: ["${taxonomy}"]. Use [] if no objections raised.
 - topic_tags: array of 3-7 free-form lowercase strings capturing what the call was about (e.g. "fiber install", "billing dispute")
-Return ONLY JSON, no prose before or after.`
-    : `You are a sales call analyst for Ava Residential. You have only call metadata — no transcript. Return ONLY JSON:
-${hasRecording ? "" : '- summary: starts with "⚡ Estimated from call metadata — " then describes what the duration suggests'}
-${hasRecording ? '- summary: 2-3 sentences based on duration and direction. The call data is real — do NOT treat as speculative.' : ""}
-- score: int 1-10 using length-based bands (short<30s: 1-3, 30s-2m: 4-6, 2-5m: 6-8, 5m+: 7-9)
-- score_reasoning: explain with duration and direction
-- talk_ratio: { agent: int, prospect: int } summing to 100
-- key_topics: array of 2-3 likely topics for an ISP sales call
-- sentiment: "positive" | "negative" | "neutral"
-- coaching: array of 2-3 tips
-- highlights: []
-- talk_ratio_rep: same as talk_ratio.agent
-- talk_ratio_prospect: same as talk_ratio.prospect
-- question_count: best guess or 0
-- longest_monologue_sec: best guess or 0
-- interruption_count: 0
-- objection_tags: []
-- topic_tags: 2-3 lowercase likely-topic strings
-Return ONLY JSON.`;
+Return ONLY JSON, no prose before or after.`;
 
   await stampStatus(call_log_id, { ai_status: "processing" });
 

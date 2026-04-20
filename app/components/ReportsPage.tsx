@@ -454,6 +454,9 @@ interface OpsHealthData {
   with_ai: number;
   transcript_failed: number;
   ai_failed: number;
+  ai_skipped_no_transcript?: number;
+  missing_recordings?: number;
+  transcript_error_samples?: Array<{ id: string; created_at: string; error: string }>;
   avg_end_to_recording_sec: number | null;
   avg_recording_to_transcript_sec: number | null;
   avg_transcript_to_ai_sec: number | null;
@@ -594,6 +597,60 @@ function OpsHealthPanel({
                   )}
                 </div>
               </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div
+                  className={`border-2 border-navy rounded-[10px] p-3 ${
+                    (data.missing_recordings || 0) > 0 ? "bg-rose" : "bg-cream-3"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-navy uppercase tracking-wider">
+                      Missing recordings (&gt;3s, connected)
+                    </span>
+                    <span className="text-[13px] font-bold text-navy tabular-nums">
+                      {data.missing_recordings ?? 0}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-navy-2 mt-1 leading-snug">
+                    Connected calls over 3 seconds that never received a
+                    recording URL from Telnyx after 5 minutes. Vercel logs
+                    show each row id.
+                  </p>
+                </div>
+                <div className="bg-cream-3 border-2 border-navy rounded-[10px] p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-navy uppercase tracking-wider">
+                      AI skipped (no transcript)
+                    </span>
+                    <span className="text-[13px] font-bold text-navy tabular-nums">
+                      {data.ai_skipped_no_transcript ?? 0}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-navy-2 mt-1 leading-snug">
+                    Coaching deliberately skipped because Whisper never
+                    produced a transcript. Retry from the History row.
+                  </p>
+                </div>
+              </div>
+
+              {data.transcript_error_samples && data.transcript_error_samples.length > 0 && (
+                <div className="bg-rose border-2 border-navy rounded-[10px] p-3">
+                  <p className="text-[11px] font-bold text-navy uppercase tracking-wider mb-2">
+                    Recent transcription errors
+                  </p>
+                  <ul className="space-y-1.5 text-[11px] text-navy font-mono">
+                    {data.transcript_error_samples.map((s) => (
+                      <li key={s.id} className="break-all">
+                        <span className="text-slate tabular-nums">
+                          {s.created_at.slice(11, 19)}
+                        </span>{" "}
+                        {s.error}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[12px]">
                 <OpsTime label="Call end → recording" seconds={data.avg_end_to_recording_sec} />
