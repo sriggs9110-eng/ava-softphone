@@ -10,6 +10,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+export {};
+
 // Force the "client" branch of fetchPool() so we can intercept /api/phone-pool.
 (globalThis as any).window = {};
 

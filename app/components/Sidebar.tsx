@@ -80,12 +80,13 @@ export default function Sidebar({
   const navItems: { page: NavPage; icon: typeof Phone; label: string }[] = [
     { page: "phone", icon: Phone, label: "Phone" },
     { page: "history", icon: Clock, label: "History" },
+    // Reports is role-aware at the API level — agents see only their own stats.
+    { page: "reports", icon: BarChart3, label: "Reports" },
   ];
 
   if (isManager) {
     navItems.push(
       { page: "monitor", icon: Users, label: "Monitor" },
-      { page: "reports", icon: BarChart3, label: "Reports" },
       { page: "transcripts", icon: FileText, label: "Transcripts" }
     );
   }

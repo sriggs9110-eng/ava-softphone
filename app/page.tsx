@@ -458,10 +458,8 @@ export default function Home() {
           {/* Monitor Page */}
           {activePage === "monitor" && isManager && <MonitorPage />}
 
-          {/* Reports Page */}
-          {activePage === "reports" && isManager && (
-            <ReportsPage entries={callHistory} />
-          )}
+          {/* Reports Page — role-aware; agents see their own, managers see team */}
+          {activePage === "reports" && <ReportsPage />}
 
           {/* Transcripts Page */}
           {activePage === "transcripts" && isManager && (
