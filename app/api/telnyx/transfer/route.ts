@@ -80,11 +80,22 @@ async function blindTransfer(args: {
   apiKey: string;
 }): Promise<NextResponse> {
   const { callControlId, to, apiKey } = args;
-  const connectionId = process.env.TELNYX_CONNECTION_ID;
-  if (!connectionId) {
-    console.log("[transfer] TELNYX_CONNECTION_ID missing");
+
+  // Telnyx's POST /v2/calls expects a Call Control Application ID in
+  // `connection_id`, NOT the Credentials-type connection ID used for
+  // SIP registration. Passing the credential connection ID fails with
+  // "The requested connection_id (Call Control App ID) is either invalid
+  // or does not exist." TELNYX_CONNECTION_ID (credential connection) is
+  // still correct for WebRTC registration and credential provisioning,
+  // so we keep it separate and only switch the transfer endpoint.
+  const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
+  if (!callControlAppId) {
+    console.log("[transfer] TELNYX_CALL_CONTROL_APP_ID missing");
     return NextResponse.json(
-      { error: "TELNYX_CONNECTION_ID not configured" },
+      {
+        error:
+          "TELNYX_CALL_CONTROL_APP_ID not configured. Add it to Vercel env vars.",
+      },
       { status: 500 }
     );
   }
@@ -103,7 +114,7 @@ async function blindTransfer(args: {
   const bodySent: Record<string, unknown> = {
     to,
     from,
-    connection_id: connectionId,
+    connection_id: callControlAppId,
     link_to: callControlId,
     bridge_on_answer: true,
     bridge_intent: true,
