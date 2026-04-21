@@ -532,25 +532,52 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     });
   }, []);
 
-  const completeTransfer = useCallback(() => {
-    if (callRef.current && transferCallRef.current) {
-      const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
-      const transferCallId = transferCallRef.current.telnyxIDs.telnyxCallControlId;
-      fetch("/api/telnyx/transfer", {
+  const completeTransfer = useCallback(async () => {
+    if (!callRef.current || !transferCallRef.current) return;
+    const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
+    const transferCallId =
+      transferCallRef.current.telnyxIDs.telnyxCallControlId;
+
+    // Bridge the two legs server-side FIRST, then let Telnyx drop our
+    // WebRTC legs via normal callUpdate events. Hanging up locally before
+    // Telnyx bridges was the round-1 bug — Telnyx couldn't act on legs
+    // that had already sent BYE, so the external caller and target each
+    // dropped instead of getting connected.
+    try {
+      const res = await fetch("/api/telnyx/transfer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           call_control_id: originalCallId,
           transfer_to_call_control_id: transferCallId,
         }),
-      }).catch(() => {});
-      transferCallRef.current.hangup();
-      callRef.current.hangup();
-      transferCallRef.current = null;
-      callRef.current = null;
-      setTransferCall(null);
-      setActiveCall(null);
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.error(
+          "[transfer] bridge failed:",
+          res.status,
+          data?.error || "(no detail)"
+        );
+        // Surface to the rep as a mic-error banner — better than silent drop.
+        setMicError(
+          `Transfer failed: ${data?.error || "Telnyx rejected the bridge"}. The call is still active; try again or cancel.`
+        );
+        return;
+      }
+    } catch (err) {
+      console.error("[transfer] bridge threw:", err);
+      setMicError(
+        "Transfer failed: network error. The call is still active."
+      );
+      return;
     }
+
+    // Telnyx is now bridging the two external legs. The rep's WebRTC legs
+    // receive BYEs from Telnyx as the bridge takes over; our `callUpdate`
+    // handler will null them out and fire onCallEnd. Clear the transfer-
+    // panel UI state now so the controls row collapses immediately.
+    setTransferCall(null);
   }, []);
 
   const cancelTransfer = useCallback(() => {
