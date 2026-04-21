@@ -665,14 +665,33 @@ export async function POST(req: NextRequest) {
     case "call.initiated": {
       const direction = payload?.direction as string | undefined;
 
-      // Inbound routing:
-      //   1. Try the configured ring group for the called number.
-      //   2. If no group matches, fall back to ringing every available
-      //      softphone_user so the caller gets SOMEONE on the line.
-      // Both paths (a) broadcast a Realtime event so the UI decorates
-      // with caller info, and (b) dial each agent's SIP endpoint via
-      // the Call Control App so their WebRTC browser actually rings.
-      if (direction === "incoming" || direction === "inbound") {
+      // Skip routing for outbound legs we ourselves created. These fire
+      // with direction="outgoing" on the Call Control App side. Safe
+      // short-circuit — no ring-group dispatch makes sense here.
+      if (direction === "outgoing" || direction === "outbound") {
+        console.log(
+          `[Webhook] call.initiated (our outbound leg) ccid=${ccid} to=${to} — skipping routing`
+        );
+      } else if (!/^\+?\d{7,15}$/.test(to)) {
+        // The credential connection ALSO POSTs to this same webhook URL,
+        // and when we dial sip:<sip_username>@sip.telnyx.com for a fan-
+        // out, Telnyx fires an "incoming" call.initiated on the
+        // registered endpoint with `to` = the SIP username (letters, not
+        // phone-shaped). Running dispatch on that creates another
+        // fan-out, which creates more registered-endpoint events — an
+        // infinite recursion that flooded the webhook before this
+        // filter. Skip anything whose `to` isn't a real phone number.
+        console.log(
+          `[Webhook] call.initiated (non-phone to=${to}, likely a SIP URI leg we dialed) ccid=${ccid} — skipping routing`
+        );
+      } else if (direction === "incoming" || direction === "inbound") {
+        // Real inbound to one of our Pepper numbers. Route it:
+        //   1. Try the configured ring group for the called number.
+        //   2. If no group matches, fall back to ringing every available
+        //      softphone_user so the caller gets SOMEONE on the line.
+        // Both paths (a) broadcast a Realtime event so the UI decorates
+        // with caller info, and (b) dial each agent's SIP endpoint via
+        // the Call Control App so their WebRTC browser actually rings.
         const groupMatched = await dispatchRingGroup({
           callControlId: ccid,
           from,
