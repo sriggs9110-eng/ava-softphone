@@ -26,9 +26,17 @@ export interface DashboardPayload {
     calls_answered: number;
     answer_rate: number;
     avg_score: number;
+    // Round 2 additions for the dedicated stats row on the homepage.
+    talk_seconds_total: number;
+    outbound_connected: number;
+    outbound_total: number;
+    quality_calls_count: number;
+    // Previous-period comparisons.
     calls_total_prev: number;
+    talk_seconds_total_prev: number;
     answer_rate_prev: number;
     avg_score_prev: number;
+    quality_calls_count_prev: number;
   };
   leaderboard: LeaderboardBlock;
   recent_activity: ActivityItem[];
@@ -204,13 +212,15 @@ export async function fetchDashboard(
       .single(),
     admin
       .from("call_logs")
-      .select("status, duration_seconds, ai_score, talk_ratio_rep, question_count, interruption_count")
+      .select(
+        "status, direction, duration_seconds, ai_score, talk_ratio_rep, question_count, interruption_count"
+      )
       .eq("user_id", opts.userId)
       .gte("created_at", todayStart.toISOString())
       .lte("created_at", todayEnd.toISOString()),
     admin
       .from("call_logs")
-      .select("status, ai_score")
+      .select("status, direction, duration_seconds, ai_score")
       .eq("user_id", opts.userId)
       .gte("created_at", yesterdayStart.toISOString())
       .lte("created_at", yesterdayEnd.toISOString()),
@@ -252,24 +262,37 @@ export async function fetchDashboard(
     full_name: string | null;
     role: string;
   } | null;
-  // full_name can legitimately be null (older seeded accounts), or it can
-  // literally be "Admin"/"Manager" from a placeholder seed. Treat role-word
-  // fallbacks as missing so we don't greet someone as their role.
+  // full_name can legitimately be null, or it can be a seed placeholder
+  // like "Admin" / "Admin User" / "Manager Account". Treat anything that
+  // looks like a role-word as missing so we don't greet the user as their
+  // role.
   const rawName = userRow?.full_name?.trim() || "";
-  const PLACEHOLDER_NAMES = new Set(["admin", "manager", "agent", "user"]);
-  let fullName =
-    rawName && !PLACEHOLDER_NAMES.has(rawName.toLowerCase()) ? rawName : "";
+  const PLACEHOLDER_WORDS = ["admin", "manager", "agent", "user"];
+  const firstWordLower = rawName.split(/\s+/)[0]?.toLowerCase() || "";
+  const looksLikePlaceholder = PLACEHOLDER_WORDS.includes(firstWordLower);
+  let fullName = rawName && !looksLikePlaceholder ? rawName : "";
+
   if (!fullName) {
-    // Pull the auth user's email and use its local-part as a best-effort
-    // first name. "stephen.riggs@foo" → "Stephen", "sriggs9110" → "Sriggs9110"
-    // (capitalize-first).
+    // Parse from email: "stephen.riggs@ava.com" → "Stephen", "sriggs9110"
+    // → "Sriggs9110". Take everything before @, split on . _ - and
+    // capitalize first letter of each token. Use the first token.
     try {
-      const { data: authUser } = await admin.auth.admin.getUserById(opts.userId);
+      const { data: authUser } = await admin.auth.admin.getUserById(
+        opts.userId
+      );
       const email = authUser?.user?.email || "";
       const local = email.split("@")[0] || "";
       if (local) {
-        const first = local.split(/[._-]/)[0];
-        fullName = first.charAt(0).toUpperCase() + first.slice(1);
+        const tokens = local
+          .split(/[._-]/)
+          .map((t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase())
+          .filter(Boolean);
+        // Skip placeholder tokens so `admin@ava.com` doesn't resolve back
+        // to "Admin" — pick the first real word, else give up to "there".
+        const picked = tokens.find(
+          (t) => !PLACEHOLDER_WORDS.includes(t.toLowerCase())
+        );
+        if (picked) fullName = picked;
       }
     } catch {
       // auth admin may not be reachable from every env; swallow and fall
@@ -281,6 +304,7 @@ export async function fetchDashboard(
   // Today stats
   const today = (todayCallsRes.data || []) as Array<{
     status: string | null;
+    direction: string | null;
     duration_seconds: number | null;
     ai_score: number | null;
     talk_ratio_rep: number | null;
@@ -289,38 +313,68 @@ export async function fetchDashboard(
   }>;
   const yesterday = (yesterdayCallsRes.data || []) as Array<{
     status: string | null;
+    direction: string | null;
+    duration_seconds: number | null;
     ai_score: number | null;
   }>;
 
-  const callsTotal = today.length;
-  const callsAnswered = today.filter((c) => CONNECTED.has(c.status || "")).length;
-  const answerRate =
-    callsTotal > 0 ? Math.round((callsAnswered / callsTotal) * 1000) / 10 : 0;
-  const scoredToday = today.filter((c) => typeof c.ai_score === "number");
-  const avgScore =
-    scoredToday.length > 0
-      ? Math.round(
-          (scoredToday.reduce((a, c) => a + (c.ai_score as number), 0) /
-            scoredToday.length) *
-            100
-        ) / 100
-      : 0;
+  // Shared aggregation for both windows. Answer rate is scoped to outbound
+  // calls specifically — inbound "answered" means the agent picked up,
+  // which is a different signal we don't want to blend in.
+  const roll = (
+    rows: typeof today | typeof yesterday
+  ) => {
+    const callsTotal = rows.length;
+    const callsAnswered = rows.filter((c) =>
+      CONNECTED.has(c.status || "")
+    ).length;
+    const outboundRows = rows.filter((c) => c.direction === "outbound");
+    const outboundTotal = outboundRows.length;
+    const outboundConnected = outboundRows.filter((c) =>
+      CONNECTED.has(c.status || "")
+    ).length;
+    const answerRate =
+      outboundTotal > 0
+        ? Math.round((outboundConnected / outboundTotal) * 1000) / 10
+        : 0;
+    const talkSecondsTotal = rows.reduce(
+      (a, c) => a + (c.duration_seconds || 0),
+      0
+    );
+    const scored = rows.filter((c) => typeof c.ai_score === "number");
+    const avgScore =
+      scored.length > 0
+        ? Math.round(
+            (scored.reduce((a, c) => a + (c.ai_score as number), 0) /
+              scored.length) *
+              100
+          ) / 100
+        : 0;
+    const qualityCalls = rows.filter(
+      (c) => typeof c.ai_score === "number" && (c.ai_score as number) >= 7
+    ).length;
+    return {
+      callsTotal,
+      callsAnswered,
+      outboundTotal,
+      outboundConnected,
+      answerRate,
+      talkSecondsTotal,
+      avgScore,
+      qualityCalls,
+    };
+  };
 
-  const callsTotalPrev = yesterday.length;
-  const answeredPrev = yesterday.filter((c) => CONNECTED.has(c.status || "")).length;
-  const answerRatePrev =
-    callsTotalPrev > 0
-      ? Math.round((answeredPrev / callsTotalPrev) * 1000) / 10
-      : 0;
-  const scoredPrev = yesterday.filter((c) => typeof c.ai_score === "number");
-  const avgScorePrev =
-    scoredPrev.length > 0
-      ? Math.round(
-          (scoredPrev.reduce((a, c) => a + (c.ai_score as number), 0) /
-            scoredPrev.length) *
-            100
-        ) / 100
-      : 0;
+  const td = roll(today);
+  const yd = roll(yesterday);
+
+  const callsTotal = td.callsTotal;
+  const callsAnswered = td.callsAnswered;
+  const answerRate = td.answerRate;
+  const avgScore = td.avgScore;
+  const callsTotalPrev = yd.callsTotal;
+  const answerRatePrev = yd.answerRate;
+  const avgScorePrev = yd.avgScore;
 
   // Recent activity — calls + voicemails merged, sorted by time desc, trim to 30
   const callItems: ActivityItem[] = (
@@ -471,9 +525,15 @@ export async function fetchDashboard(
       calls_answered: callsAnswered,
       answer_rate: answerRate,
       avg_score: avgScore,
+      talk_seconds_total: td.talkSecondsTotal,
+      outbound_connected: td.outboundConnected,
+      outbound_total: td.outboundTotal,
+      quality_calls_count: td.qualityCalls,
       calls_total_prev: callsTotalPrev,
+      talk_seconds_total_prev: yd.talkSecondsTotal,
       answer_rate_prev: answerRatePrev,
       avg_score_prev: avgScorePrev,
+      quality_calls_count_prev: yd.qualityCalls,
     },
     leaderboard,
     recent_activity: recentActivity,

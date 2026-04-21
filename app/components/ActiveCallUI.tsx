@@ -10,9 +10,10 @@ import {
   ArrowRightLeft,
   Voicemail,
   UserPlus,
+  PhoneOff,
 } from "lucide-react";
 import { ActiveCallInfo } from "@/app/lib/types";
-import PepperMascot, { PepperState } from "@/components/pepper/PepperMascot";
+import { formatUSPhone } from "@/lib/format-phone";
 
 interface ActiveCallUIProps {
   call: ActiveCallInfo;
@@ -31,6 +32,12 @@ const DTMF_KEYS = [
   ["*", "0", "#"],
 ];
 
+/**
+ * Active call hero — consolidated in round 2. Single compact header card,
+ * horizontal icon-row controls, prominent end-call button centered below.
+ * No mascot panel here; the right-rail PepperCorner owns the listening
+ * affordance during a call.
+ */
 export default function ActiveCallUI({
   call,
   onHangup,
@@ -57,7 +64,9 @@ export default function ActiveCallUI({
   }, [call.status, call.startTime]);
 
   const formatDuration = useCallback((secs: number) => {
-    const m = Math.floor(secs / 60).toString().padStart(2, "0");
+    const m = Math.floor(secs / 60)
+      .toString()
+      .padStart(2, "0");
     const s = (secs % 60).toString().padStart(2, "0");
     return `${m}:${s}`;
   }, []);
@@ -72,89 +81,74 @@ export default function ActiveCallUI({
     [onDTMF]
   );
 
-  const statusLabel =
-    call.status === "dialing"
-      ? "Dialing..."
-      : call.status === "ringing"
-      ? "Ringing..."
-      : call.status === "held"
-      ? "On Hold"
-      : call.status === "active"
-      ? formatDuration(elapsed)
-      : call.status;
+  const prettyNumber = formatUSPhone(call.number);
+  const directionLabel =
+    call.direction === "inbound" ? "INBOUND" : "OUTBOUND";
+  const timerText = formatDuration(elapsed);
 
-  const pepperState: PepperState =
-    call.status === "dialing" || call.status === "ringing"
-      ? "thinking"
-      : call.status === "held"
-      ? "listening"
-      : "listening";
+  const statusChip =
+    call.status === "active" ? (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-leaf border-2 border-navy shadow-pop-sm">
+        <span className="relative w-2 h-2">
+          <span className="absolute inset-0 rounded-full bg-white border border-navy" />
+          <span className="absolute inset-0 rounded-full bg-white animate-pulse-ring" />
+        </span>
+        <span className="text-[10px] font-bold uppercase tracking-wider text-white">
+          Connected
+        </span>
+      </span>
+    ) : call.status === "held" ? (
+      <span className="px-2 py-0.5 rounded-full bg-banana border-2 border-navy shadow-pop-sm text-[10px] font-bold uppercase tracking-wider text-navy">
+        On Hold
+      </span>
+    ) : (
+      <span className="px-2 py-0.5 rounded-full bg-banana border-2 border-navy shadow-pop-sm text-[10px] font-bold uppercase tracking-wider text-navy">
+        {call.status === "dialing" ? "Dialing" : "Ringing"}
+      </span>
+    );
 
   return (
-    <div className="flex flex-col lg:flex-row items-center lg:items-start justify-center gap-6 lg:gap-10 w-full py-8 animate-slide-up relative">
-      {/* Main call panel */}
-      <div className="flex flex-col items-center gap-7 w-full max-w-[380px]">
-      {/* Status indicator */}
-      {call.status === "active" && (
-        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-leaf border-2 border-navy shadow-pop-sm">
-          <div className="relative">
-            <div className="w-2.5 h-2.5 rounded-full bg-white border border-navy" />
-            <div className="absolute inset-0 w-2.5 h-2.5 rounded-full bg-white animate-pulse-ring" />
-          </div>
-          <span className="text-[11px] font-bold uppercase tracking-wider text-white">
-            Connected
+    <div className="flex flex-col items-stretch gap-4 w-full max-w-[440px] mx-auto animate-fade-in">
+      {/* Compact call header card */}
+      <div className="bg-paper border-[2.5px] border-navy rounded-[14px] shadow-pop-md px-4 py-3">
+        <div className="flex items-center justify-between">
+          {statusChip}
+          <span className="text-[11px] text-slate font-semibold">
+            {call.isMuted ? "MUTED" : ""}
           </span>
         </div>
-      )}
-
-      {call.status === "held" && (
-        <div className="px-3 py-1 rounded-full bg-banana border-2 border-navy shadow-pop-sm">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-navy">
-            On Hold
-          </span>
-        </div>
-      )}
-
-      {(call.status === "dialing" || call.status === "ringing") && (
-        <div className="px-3 py-1 rounded-full bg-banana border-2 border-navy shadow-pop-sm">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-navy">
-            {call.status === "dialing" ? "Dialing" : "Ringing"}
-          </span>
-        </div>
-      )}
-
-      {/* Number */}
-      <div className="text-center">
-        <p className="text-[32px] font-semibold text-navy tracking-[0.5px] font-display">
-          {call.number}
+        <p className="mt-1 text-[2rem] leading-tight font-bold text-navy font-display tabular-nums tracking-tight">
+          {prettyNumber}
         </p>
-        <p className="text-[11px] text-slate mt-1 uppercase tracking-[0.5px] font-bold">
-          {call.direction === "inbound" ? "Incoming Call" : "Outgoing Call"}
-        </p>
+        <div className="mt-1 flex items-center justify-between text-[13px]">
+          <span className="text-slate font-display italic tabular-nums">
+            {directionLabel}
+          </span>
+          {call.status === "active" && (
+            <span className="text-navy font-semibold tabular-nums font-display text-[1.5rem] leading-none">
+              {timerText}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Timer */}
-      <p className="text-[48px] font-bold text-navy tabular-nums font-display">
-        {statusLabel}
-      </p>
-
-      {/* Row 1: Mute, Hold, Keypad */}
-      <div className="flex items-center gap-4">
-        <ActionBtn
+      {/* Controls row — circular icon buttons, single row */}
+      <div className="flex items-start justify-around gap-2">
+        <IconButton
           icon={call.isMuted ? <MicOff size={18} /> : <Mic size={18} />}
           label={call.isMuted ? "Unmute" : "Mute"}
           active={call.isMuted}
-          activeColor="banana"
+          activeColor="coral"
           onClick={onToggleMute}
         />
-        <ActionBtn
+        <IconButton
           icon={call.isHeld ? <Play size={18} /> : <Pause size={18} />}
           label={call.isHeld ? "Resume" : "Hold"}
           active={call.isHeld}
-          activeColor="banana"
+          activeColor="coral"
           onClick={onToggleHold}
         />
-        <ActionBtn
+        <IconButton
           icon={<Grid3X3 size={18} />}
           label="Keypad"
           active={showKeypad}
@@ -163,109 +157,72 @@ export default function ActiveCallUI({
             if (!showKeypad) setDtmfDigits("");
           }}
         />
-      </div>
-
-      {/* Row 2: Transfer, VM Drop, Add Call */}
-      <div className="flex items-center gap-4">
-        <ActionBtn
+        <IconButton
           icon={<ArrowRightLeft size={18} />}
           label="Transfer"
           onClick={onTransfer}
         />
-        <ActionBtn
+        <IconButton
           icon={<Voicemail size={18} />}
           label="VM Drop"
           onClick={onVoicemailDrop}
         />
-        <ActionBtn
+        <IconButton
           icon={<UserPlus size={18} />}
-          label="Add Call"
+          label="Add"
           onClick={() => {}}
         />
       </div>
 
-      {/* End Call */}
-      <button
-        onClick={onHangup}
-        className="w-16 h-16 rounded-full bg-coral border-[2.5px] border-navy flex items-center justify-center transition-all duration-150 active:scale-95 mt-4 shadow-pop-md shadow-pop-hover"
-        aria-label="End Call"
-      >
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="white">
-          <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 010-1.36C3.69 8.68 7.61 7 12 7s8.31 1.68 11.71 4.72c.18.18.29.44.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z" />
-        </svg>
-      </button>
-
-      {/* Calling from */}
-      <p className="text-[12px] text-slate">
-        Calling from: {process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "Not set"}
-      </p>
-      </div>
-
-      {/* Right rail — Pepper coach panel */}
-      <aside className="w-full lg:w-[280px] shrink-0">
-        <div className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 shadow-pop-md flex flex-col items-center text-center">
-          <PepperMascot state={pepperState} size="md" />
-          <p className="mt-3 text-[15px] font-semibold text-navy font-display">
-            Pepper&apos;s listening
-          </p>
-          <p className="mt-1 text-[13px] text-slate font-accent text-lg leading-tight">
-            I&rsquo;ll jump in if you need me.
-          </p>
-        </div>
-      </aside>
-
-      {/* DTMF Keypad Overlay */}
+      {/* Inline DTMF keypad — expands below the controls row when Keypad
+          is toggled. No more modal overlay. */}
       {showKeypad && (
-        <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-navy/60 backdrop-blur-sm"
-          onClick={() => setShowKeypad(false)}
-        >
-          <div
-            className="bg-paper border-[2.5px] border-navy rounded-[18px] p-5 w-full max-w-[280px] animate-slide-up shadow-pop-lg"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Digit display */}
-            <div className="text-center mb-4 h-8 relative">
-              {dtmfDigits && (
-                <p className="text-[22px] font-semibold text-navy tracking-[2px] tabular-nums font-display">
-                  {dtmfDigits}
-                </p>
-              )}
-              {dtmfFlash && (
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[56px] font-bold text-banana opacity-70 pointer-events-none animate-fade-in font-display">
-                  {dtmfFlash}
-                </div>
-              )}
-            </div>
-
-            {/* Keys */}
-            <div className="grid grid-cols-3 gap-3">
-              {DTMF_KEYS.flat().map((key) => (
-                <button
-                  key={key}
-                  onClick={() => handleDTMF(key)}
-                  className="w-14 h-14 mx-auto rounded-full bg-cream-2 border-2 border-navy active:scale-95 text-xl font-semibold text-navy transition-all duration-100 shadow-pop-sm shadow-pop-hover font-display"
-                >
-                  {key}
-                </button>
-              ))}
-            </div>
-
-            {/* Close */}
-            <button
-              onClick={() => setShowKeypad(false)}
-              className="w-full mt-4 py-2.5 rounded-full bg-paper border-2 border-navy text-navy text-sm font-semibold transition-colors shadow-pop-sm shadow-pop-hover"
-            >
-              Close
-            </button>
+        <div className="bg-cream-3 border-2 border-navy rounded-[14px] p-3 animate-fade-in">
+          <div className="relative h-7 text-center mb-2">
+            {dtmfDigits && (
+              <p className="text-[18px] font-semibold text-navy tracking-[2px] tabular-nums font-display">
+                {dtmfDigits}
+              </p>
+            )}
+            {dtmfFlash && (
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-[40px] font-bold text-banana opacity-70 pointer-events-none animate-fade-in font-display">
+                {dtmfFlash}
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {DTMF_KEYS.flat().map((key) => (
+              <button
+                key={key}
+                onClick={() => handleDTMF(key)}
+                className="w-11 h-11 mx-auto rounded-full bg-paper border-2 border-navy active:scale-95 text-base font-semibold text-navy transition-all duration-100 shadow-pop-sm shadow-pop-hover font-display"
+              >
+                {key}
+              </button>
+            ))}
           </div>
         </div>
       )}
+
+      {/* End call — prominent, centered */}
+      <div className="flex flex-col items-center mt-1">
+        <button
+          onClick={onHangup}
+          className="w-[72px] h-[72px] rounded-full bg-coral border-[2.5px] border-navy flex items-center justify-center transition-all duration-150 active:scale-95 shadow-pop-md shadow-pop-hover"
+          aria-label="End call"
+          title="End call"
+        >
+          <PhoneOff size={26} strokeWidth={2.5} className="text-white" />
+        </button>
+        <span className="mt-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-coral-deep font-display">
+          End Call
+        </span>
+      </div>
     </div>
   );
 }
 
-function ActionBtn({
+function IconButton({
   icon,
   label,
   active,
@@ -282,18 +239,21 @@ function ActionBtn({
     activeColor === "coral"
       ? "bg-coral text-white"
       : "bg-banana text-navy";
-
   return (
-    <button
-      onClick={onClick}
-      className={`flex flex-col items-center justify-center gap-1.5 w-[72px] py-3 rounded-[14px] border-[2.5px] border-navy transition-all duration-150 min-h-[56px] shadow-pop-sm shadow-pop-hover ${
-        active ? activeBg : "bg-paper text-navy"
-      }`}
-    >
-      {icon}
-      <span className="text-[10px] font-bold uppercase tracking-[0.5px]">
+    <div className="flex flex-col items-center gap-1 w-[60px]">
+      <button
+        onClick={onClick}
+        className={`w-[52px] h-[52px] rounded-full border-2 border-navy shadow-pop-sm shadow-pop-hover transition-colors flex items-center justify-center ${
+          active ? activeBg : "bg-paper text-navy"
+        }`}
+        aria-label={label}
+        title={label}
+      >
+        {icon}
+      </button>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-slate font-display text-center leading-tight">
         {label}
       </span>
-    </button>
+    </div>
   );
 }

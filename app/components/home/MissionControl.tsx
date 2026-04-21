@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import TopBar from "./TopBar";
+import DayStats from "./DayStats";
 import Leaderboard from "./Leaderboard";
 import ActivityRail from "./ActivityRail";
 import TeamPresence from "./TeamPresence";
@@ -118,7 +119,10 @@ export default function MissionControl({
   return (
     <div className="w-full flex flex-col">
       {user && stats ? (
-        <TopBar firstName={user.first_name} stats={stats} />
+        <>
+          <TopBar firstName={user.first_name} />
+          <DayStats stats={stats} />
+        </>
       ) : (
         <div className="w-full bg-cream-2 border-b-2 border-navy min-h-[72px] flex items-center px-6">
           <Loader2 size={16} className="animate-spin text-slate" />
@@ -148,9 +152,10 @@ export default function MissionControl({
           </div>
 
           {/* HERO ZONE — always present; biggest shadow on the page since
-              this is where the rep's eye should land. */}
+              this is where the rep's eye should land. shadow-pop-lg is
+              defined in globals.css as `7px 7px 0 navy`. */}
           <div className="flex flex-col min-w-0">
-            <div className="w-full bg-paper border-[3px] border-navy rounded-[18px] shadow-pop-lg p-5 flex flex-col items-center justify-center min-h-[420px]">
+            <div className="w-full bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-lg p-5 flex flex-col items-center justify-center min-h-[420px]">
               {hero}
             </div>
             {belowHero}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Trophy } from "lucide-react";
+// Trophy icon avoids the missing-glyph rendering we saw on 🏆 in round 1.
 import type { LeaderboardBlock, LeaderboardPeriod } from "@/lib/home/dashboard";
 
 interface Props {
@@ -50,20 +51,24 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
 
   return (
     <div className="bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-md overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b-2 border-navy bg-cream-2">
-        <h3 className="text-base font-semibold text-navy font-display">
+      <div className="px-4 pt-3 pb-2 border-b-2 border-navy bg-cream-2">
+        <h3 className="text-base font-semibold text-navy font-display mb-2">
           Leaderboard
         </h3>
-        <div className="flex rounded-full border-2 border-navy overflow-hidden bg-paper">
-          {PERIODS.map((p, i) => {
+        {/* Period pills on their own row — prevents "MONTH" clipping against
+            the title at the 280px rail width. */}
+        <div className="grid grid-cols-3 gap-1.5">
+          {PERIODS.map((p) => {
             const active = period === p;
             return (
               <button
                 key={p}
                 onClick={() => onPick(p)}
-                className={`px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${
-                  active ? "bg-banana text-navy" : "text-navy/70 hover:text-navy"
-                } ${i > 0 ? "border-l border-navy" : ""}`}
+                className={`h-7 text-[11px] font-semibold uppercase tracking-wider font-display rounded-[8px] border-[1.5px] border-navy transition-colors ${
+                  active
+                    ? "bg-banana text-navy shadow-pop-sm"
+                    : "bg-paper text-navy hover:bg-cream-3"
+                }`}
               >
                 {p}
               </button>
@@ -85,6 +90,8 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
         ) : (
           block.rows.slice(0, 8).map((r, i, arr) => {
             const isMe = r.user_id === currentUserId;
+            const isTop = r.rank === 1;
+            const prevIsTop = i > 0 && arr[i - 1]?.rank === 1;
             const tierBg =
               r.rank === 1
                 ? "bg-banana"
@@ -94,23 +101,32 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
                 ? "bg-cream-3"
                 : "bg-paper";
             const notLast = i < arr.length - 1;
+            // Dashed separator goes BELOW each non-last row. Suppress it
+            // around row 1 so the banana highlight reads as a solid band
+            // instead of being bisected by a dashed line. Row 2 also gets
+            // no top artifact because the dashed line was on row 1's
+            // bottom — no extra work needed there.
+            const showDashed = notLast && !isTop;
+            // Row immediately below row 1 gets a clean 2px navy top edge
+            // to act as the separator for the banana highlight.
+            const topDivider = prevIsTop ? "border-t-2 border-navy" : "";
             return (
               <div
                 key={r.user_id}
                 className={`flex items-center gap-2.5 px-3 py-2 ${tierBg} ${
                   isMe ? "border-l-[3px] border-coral pl-[9px]" : ""
-                } ${notLast ? "border-b border-dashed border-navy/30" : ""}`}
+                } ${showDashed ? "border-b border-dashed border-navy/30" : ""} ${topDivider}`}
               >
-                <span className="w-5 text-[12px] font-semibold text-coral font-display italic tabular-nums shrink-0">
+                <span className="w-5 text-[16px] font-semibold text-coral font-display italic tabular-nums shrink-0 leading-none">
                   {String(r.rank).padStart(2, "0")}
                 </span>
                 <span
-                  className="w-8 h-8 rounded-full border-2 border-navy flex items-center justify-center text-[11px] font-bold text-navy shrink-0"
+                  className="w-7 h-7 rounded-full border-2 border-navy flex items-center justify-center text-[10px] font-bold text-navy shrink-0"
                   style={{ background: r.avatar_color }}
                 >
                   {r.initials}
                 </span>
-                <span className="flex-1 text-[13px] font-semibold text-navy truncate leading-none">
+                <span className="flex-1 text-[14px] font-medium text-navy truncate leading-none">
                   {r.name}
                   {isMe && (
                     <span className="ml-1 text-[10px] text-coral font-bold uppercase tracking-wider">
@@ -118,7 +134,7 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
                     </span>
                   )}
                 </span>
-                <span className="text-[13px] font-bold text-navy tabular-nums shrink-0">
+                <span className="text-[16px] font-semibold text-navy tabular-nums shrink-0 font-display leading-none">
                   {r.connected_calls}
                 </span>
               </div>
@@ -131,7 +147,7 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
         <div className="bg-cream-3 border-t-2 border-navy px-4 py-2 text-[11px] text-navy font-semibold flex items-center gap-1.5">
           {myRank === 1 ? (
             <>
-              <Trophy size={12} className="text-banana-deep" />
+              <Trophy size={14} className="text-banana-deep" strokeWidth={2.5} />
               You&rsquo;re leading the pack
             </>
           ) : (
