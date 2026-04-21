@@ -576,11 +576,21 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     });
   }, []);
 
-  // Blind transfer: tell Telnyx to redirect the current call to a new
-  // number server-side. No second WebRTC leg gets created; Telnyx dials
-  // the destination itself and bridges the existing far-side leg,
-  // dropping the rep. Cleaner than the attended bridge approach when
-  // the rep doesn't need to talk to the destination first.
+  // Blind transfer.
+  //
+  // Server-side: we POST to /api/telnyx/transfer which dials the
+  // destination via Telnyx's `POST /v2/calls` with `link_to` pointing at
+  // the rep's current call and `bridge_on_answer=true`. Telnyx puts the
+  // new leg into the same call_session_id and will auto-bridge the two
+  // calls when the destination answers. (This replaced `/actions/transfer`
+  // which half-bridged on WebRTC source legs — destination answered but
+  // `call.bridged` never fired, so audio didn't flow.)
+  //
+  // Client-side: once the POST returns 200, we immediately hang up the
+  // rep's WebRTC leg via the SDK. The rep dropping out of the original
+  // call lets Telnyx complete the bridge between the original far-side
+  // and the new destination leg without the rep's WebRTC endpoint
+  // hanging around in the session.
   const blindTransfer = useCallback(
     async (targetNumber: string): Promise<boolean> => {
       const active = callRef.current;
@@ -619,9 +629,17 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
           );
           return false;
         }
-        // Do NOT hang up locally. Telnyx will drop the rep's WebRTC leg
-        // via a callUpdate → hangup event as soon as it bridges the
-        // destination in. The regular hangup handler cleans up state.
+        // Hang up the rep's WebRTC leg now — see comment block above.
+        // The standard hangup handler in the notification listener
+        // cleans up activeCall/agentStatus.
+        transferDebug("blindTransfer — hanging up rep WebRTC leg", {
+          newCallControlId: data?.new_call_control_id,
+        });
+        try {
+          active.hangup();
+        } catch (hangupErr) {
+          console.warn("[transfer] hangup after transfer threw:", hangupErr);
+        }
         return true;
       } catch (err) {
         console.error("[transfer] blind threw:", err);
