@@ -25,6 +25,27 @@ import { Loader2 } from "lucide-react";
 import { insertCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
 import { CallHistoryEntry } from "@/app/lib/types";
 import { useRouter } from "next/navigation";
+import { formatUSPhone } from "@/lib/format-phone";
+
+// Resolve the caller-ID to display on the inbound overlay.
+//
+// For server-orchestrated inbound (ring-group / fallback fan-out) the
+// Telnyx SDK surfaces the SIP username of the outbound leg we dialed,
+// not the actual caller — e.g. "gencredSkgd8M1u1tI3...". The Realtime
+// broadcast carries the verified original caller number from the
+// webhook payload, so we prefer that. The SDK value is only used as a
+// fallback for direct-to-endpoint inbound (no ring-group orchestration)
+// and only if it's actually phone-shaped.
+function resolveCallerNumber(
+  realtimeFrom: string | null | undefined,
+  sdkCallerNumber: string | null | undefined
+): string {
+  if (realtimeFrom) return realtimeFrom;
+  if (sdkCallerNumber && /^\+?\d{7,15}$/.test(sdkCallerNumber)) {
+    return sdkCallerNumber;
+  }
+  return "Unknown";
+}
 
 const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
   phone: { title: "Phone", subtitle: "Make or receive calls" },
@@ -257,7 +278,14 @@ export default function Home() {
   );
 
   const handleAnswerCall = useCallback(async () => {
-    const callerNumber = inboundCall?.options?.callerNumber || "Unknown";
+    // Same caller-resolution as the overlay — groupCall.from is the
+    // verified original caller from the Realtime broadcast; the SDK's
+    // value is a SIP username on server-orchestrated fan-out legs and
+    // would pollute call_logs.phone_number.
+    const callerNumber = resolveCallerNumber(
+      groupCall?.from,
+      inboundCall?.options?.callerNumber
+    );
     const ccid = answerCall();
 
     // If this was a ring-group call, notify the other members so their
@@ -431,8 +459,12 @@ export default function Home() {
       {/* Inbound call overlay */}
       {inboundCall && !activeCall && (
         <InboundCallUI
-          callerNumber={inboundCall.options.callerNumber || "Unknown"}
-          ringGroupName={groupCall?.group_name}
+          callerNumber={formatUSPhone(
+            resolveCallerNumber(groupCall?.from, inboundCall.options.callerNumber)
+          )}
+          ringGroupName={
+            groupCall?.group_id === "__fallback__" ? "Direct" : groupCall?.group_name
+          }
           onAccept={handleAnswerCall}
           onReject={rejectCall}
         />
