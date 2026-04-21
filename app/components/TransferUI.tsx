@@ -13,7 +13,13 @@ const KEYS = [
 interface TransferUIProps {
   originalCall: ActiveCallInfo;
   transferCall: ActiveCallInfo | null;
+  // Warm transfer: dial target, rep talks, then Complete. Uses the
+  // attended /actions/bridge path server-side.
   onDial: (number: string) => void;
+  // Blind transfer: hand off directly to Telnyx's /actions/transfer —
+  // no second WebRTC leg, rep drops out as Telnyx bridges the new
+  // destination in. This is the primary path for quick redirects.
+  onBlindTransfer: (number: string) => void;
   onComplete: () => void;
   onCancel: () => void;
   onConference: () => void;
@@ -23,6 +29,7 @@ export default function TransferUI({
   originalCall,
   transferCall,
   onDial,
+  onBlindTransfer,
   onComplete,
   onCancel,
   onConference,
@@ -42,6 +49,12 @@ export default function TransferUI({
       onDial(number);
     }
   }, [number, onDial]);
+
+  const handleBlindTransfer = useCallback(() => {
+    if (number.length > 2) {
+      onBlindTransfer(number);
+    }
+  }, [number, onBlindTransfer]);
 
   // Phase 1: Dialing transfer target
   if (!transferCall || transferCall.status === "dialing") {
@@ -96,10 +109,10 @@ export default function TransferUI({
                 </button>
                 {number.length > 2 && (
                   <button
-                    onClick={handleDial}
+                    onClick={handleBlindTransfer}
                     className="flex-1 py-3 rounded-lg bg-green hover:bg-green/90 text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
                   >
-                    Call
+                    Transfer
                   </button>
                 )}
                 <button
@@ -114,6 +127,15 @@ export default function TransferUI({
                   </svg>
                 </button>
               </div>
+
+              {number.length > 2 && (
+                <button
+                  onClick={handleDial}
+                  className="w-full text-[12px] text-text-tertiary hover:text-text-secondary font-medium underline underline-offset-4 decoration-dotted transition-colors"
+                >
+                  Talk to destination first (warm transfer)
+                </button>
+              )}
             </>
           )}
 

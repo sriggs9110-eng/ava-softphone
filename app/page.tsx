@@ -103,6 +103,7 @@ export default function Home() {
     toggleMute,
     toggleHold,
     sendDTMF,
+    blindTransfer,
     initiateTransfer,
     completeTransfer,
     cancelTransfer,
@@ -295,7 +296,23 @@ export default function Home() {
     [callHistory]
   );
 
-  const handleTransferClick = useCallback(() => setShowTransfer(true), []);
+  const handleTransferClick = useCallback(() => {
+    if (typeof window !== "undefined") {
+      try {
+        if (new URL(window.location.href).searchParams.get("transferDebug") === "1") {
+          console.log("[TRANSFER-DEBUG] transfer button clicked");
+        }
+      } catch {}
+    }
+    setShowTransfer(true);
+  }, []);
+  const handleTransferBlind = useCallback(
+    async (number: string) => {
+      const ok = await blindTransfer(number);
+      if (ok) setShowTransfer(false);
+    },
+    [blindTransfer]
+  );
   const handleTransferDial = useCallback(
     (number: string) => initiateTransfer(number),
     [initiateTransfer]
@@ -439,6 +456,7 @@ export default function Home() {
           originalCall={activeCall}
           transferCall={transferCall}
           onDial={handleTransferDial}
+          onBlindTransfer={handleTransferBlind}
           onComplete={handleTransferComplete}
           onCancel={handleTransferCancel}
           onConference={handleConference}

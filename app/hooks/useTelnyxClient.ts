@@ -14,6 +14,22 @@ import { QualityLevel } from "@/app/components/ConnectionQuality";
 
 const ACW_DURATION = 30;
 
+// Verbose transfer logging toggled by ?transferDebug=1 in the URL. Lets
+// Stephen (or any operator) flip on instrumentation without shipping a
+// code change. Logs are prefixed [TRANSFER-DEBUG] for easy filtering.
+function transferDebugEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return new URL(window.location.href).searchParams.get("transferDebug") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function transferDebug(msg: string, ...args: unknown[]) {
+  if (transferDebugEnabled()) console.log(`[TRANSFER-DEBUG] ${msg}`, ...args);
+}
+
 // Web Audio ringtone generator
 function createRingtoneOscillator(audioCtx: AudioContext): { start: () => void; stop: () => void } {
   let intervalId: ReturnType<typeof setInterval> | null = null;
@@ -532,8 +548,12 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     callRef.current.dtmf(digit);
   }, []);
 
+  // Warm / attended transfer: dial the target first so the rep can talk
+  // to them, then press Complete Transfer (which fires `completeTransfer`
+  // below and calls Telnyx's bridge primitive).
   const initiateTransfer = useCallback((targetNumber: string) => {
     if (!clientRef.current || !callRef.current) return;
+    transferDebug("initiateTransfer (warm) — dialing target", { targetNumber });
     callRef.current.hold();
     setActiveCall((prev) =>
       prev ? { ...prev, isHeld: true, status: "held" } : null
@@ -556,11 +576,71 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     });
   }, []);
 
+  // Blind transfer: tell Telnyx to redirect the current call to a new
+  // number server-side. No second WebRTC leg gets created; Telnyx dials
+  // the destination itself and bridges the existing far-side leg,
+  // dropping the rep. Cleaner than the attended bridge approach when
+  // the rep doesn't need to talk to the destination first.
+  const blindTransfer = useCallback(
+    async (targetNumber: string): Promise<boolean> => {
+      const active = callRef.current;
+      if (!active) {
+        transferDebug("blindTransfer — no active call");
+        return false;
+      }
+      const ccid = active.telnyxIDs?.telnyxCallControlId;
+      if (!ccid) {
+        transferDebug("blindTransfer — no call_control_id on active call");
+        return false;
+      }
+      transferDebug("blindTransfer — POST /api/telnyx/transfer", {
+        call_control_id: ccid,
+        to: targetNumber,
+      });
+      try {
+        const res = await fetch("/api/telnyx/transfer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            call_control_id: ccid,
+            to: targetNumber,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        transferDebug("blindTransfer — response", { status: res.status, data });
+        if (!res.ok) {
+          console.error(
+            "[transfer] blind failed:",
+            res.status,
+            data?.error || "(no detail)"
+          );
+          setMicError(
+            `Transfer failed: ${data?.error || "Telnyx rejected the transfer"}. The call is still active; try again or cancel.`
+          );
+          return false;
+        }
+        // Do NOT hang up locally. Telnyx will drop the rep's WebRTC leg
+        // via a callUpdate → hangup event as soon as it bridges the
+        // destination in. The regular hangup handler cleans up state.
+        return true;
+      } catch (err) {
+        console.error("[transfer] blind threw:", err);
+        setMicError("Transfer failed: network error. The call is still active.");
+        return false;
+      }
+    },
+    []
+  );
+
   const completeTransfer = useCallback(async () => {
     if (!callRef.current || !transferCallRef.current) return;
     const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
     const transferCallId =
       transferCallRef.current.telnyxIDs.telnyxCallControlId;
+    transferDebug("completeTransfer (warm/bridge) — POST /api/telnyx/transfer", {
+      call_control_id: originalCallId,
+      transfer_to_call_control_id: transferCallId,
+    });
 
     // Bridge the two legs server-side FIRST, then let Telnyx drop our
     // WebRTC legs via normal callUpdate events. Hanging up locally before
@@ -576,6 +656,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
           transfer_to_call_control_id: transferCallId,
         }),
       });
+      transferDebug("completeTransfer — response", { status: res.status });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         console.error(
@@ -691,6 +772,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     toggleMute,
     toggleHold,
     sendDTMF,
+    blindTransfer,
     initiateTransfer,
     completeTransfer,
     cancelTransfer,
