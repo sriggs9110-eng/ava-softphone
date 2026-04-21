@@ -81,54 +81,58 @@ async function blindTransfer(args: {
 }): Promise<NextResponse> {
   const { callControlId, to, apiKey } = args;
 
-  // Telnyx's POST /v2/calls expects a Call Control Application ID in
-  // `connection_id`, NOT the Credentials-type connection ID used for
-  // SIP registration. Passing the credential connection ID fails with
-  // "The requested connection_id (Call Control App ID) is either invalid
-  // or does not exist." TELNYX_CONNECTION_ID (credential connection) is
-  // still correct for WebRTC registration and credential provisioning,
-  // so we keep it separate and only switch the transfer endpoint.
-  const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
-  if (!callControlAppId) {
-    console.log("[transfer] TELNYX_CALL_CONTROL_APP_ID missing");
-    return NextResponse.json(
-      {
-        error:
-          "TELNYX_CALL_CONTROL_APP_ID not configured. Add it to Vercel env vars.",
-      },
-      { status: 500 }
+  // Blind transfer uses SIP REFER on the EXTERNAL leg of the rep's
+  // existing bridge. The prior approach (POST /v2/calls with link_to
+  // + bridge_on_answer) collapsed the original bridge before Telnyx
+  // could complete the new bridge — rep + external caller both
+  // dropped. REFER asks Telnyx to redirect the external party to a
+  // new destination while keeping the bridge intact, then the rep's
+  // WebRTC leg drops naturally when its peer disappears.
+  //
+  // To issue REFER we need the external leg's ccid, not the rep's
+  // WebRTC ccid. We captured it into call_logs.external_ccid on
+  // call.bridged — see webhook handler. If it's missing (e.g. call
+  // predates the feature), we fall back to the rep's ccid with a
+  // [transfer/fallback] warning; that path is the old broken one but
+  // strictly no worse than refusing the transfer.
+
+  const admin = createAdminClient();
+  const { data: logRow } = await admin
+    .from("call_logs")
+    .select("id, call_control_id, external_ccid, phone_number, from_number")
+    .eq("call_control_id", callControlId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const externalCcid =
+    (logRow?.external_ccid as string | null) || null;
+
+  const targetCcid = externalCcid || callControlId;
+  if (!externalCcid) {
+    console.log(
+      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} — REFER against rep's leg (may fail)`
     );
   }
 
-  const from = await resolveBlindTransferFrom(callControlId);
+  // Telnyx expects a SIP URI. For PSTN destinations, route via
+  // sip:+E164@sip.telnyx.com — Telnyx handles the carrier hop.
+  const normalizedTo = to.startsWith("+") ? to : `+${to}`;
+  const sipAddress = `sip:${normalizedTo}@sip.telnyx.com`;
 
-  // POST /v2/calls with link_to + bridge_on_answer.
-  //
-  // - `link_to`: puts the new call into the same call_session_id as the
-  //   existing call, so Telnyx's internal bookkeeping knows they're
-  //   related.
-  // - `bridge_on_answer`: once the destination answers, Telnyx auto-
-  //   bridges the two calls.
-  // - `bridge_intent`: declares up-front that we intend to bridge —
-  //   Telnyx uses this to keep the parked state consistent.
   const bodySent: Record<string, unknown> = {
-    to,
-    from,
-    connection_id: callControlAppId,
-    link_to: callControlId,
-    bridge_on_answer: true,
-    bridge_intent: true,
-    // Leave ringing for 30s before giving up on the destination.
-    timeout_secs: 30,
+    sip_address: sipAddress,
   };
 
+  const endpoint = `${TELNYX_API}/calls/${targetCcid}/actions/refer`;
+
   console.log(
-    `[transfer] request callControlId=${callControlId} to=${to} from=${from} bodySent=${JSON.stringify(
+    `[transfer/refer] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${to} bodySent=${JSON.stringify(
       bodySent
     )}`
   );
 
-  const res = await fetch(`${TELNYX_API}/calls`, {
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -139,28 +143,30 @@ async function blindTransfer(args: {
   const data = await res.json().catch(() => ({}));
 
   console.log(
-    `[transfer] response status=${res.status} responseBody=${JSON.stringify(
+    `[transfer/refer] response status=${res.status} responseBody=${JSON.stringify(
       data
     )}`
   );
 
   if (!res.ok) {
-    const detail = data?.errors?.[0]?.detail || "Blind transfer dial failed";
+    const detail =
+      data?.errors?.[0]?.detail ||
+      data?.errors?.[0]?.title ||
+      "SIP REFER failed";
     console.log(
-      `[transfer] blind FAILED ${res.status} ccid=${callControlId} to=${to} from=${from}: ${detail}`
+      `[transfer/refer] FAILED ${res.status} targetCcid=${targetCcid} to=${to}: ${detail}`
     );
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
-  const newCcid =
-    (data?.data?.call_control_id as string | undefined) || null;
   console.log(
-    `[transfer] blind ok ccid=${callControlId} to=${to} from=${from} newCcid=${newCcid}`
+    `[transfer/refer] ok targetCcid=${targetCcid} to=${to} — waiting for call.refer.* webhooks`
   );
 
   return NextResponse.json({
     success: true,
-    new_call_control_id: newCcid,
+    target_call_control_id: targetCcid,
+    used_external_leg: Boolean(externalCcid),
   });
 }
 
@@ -193,67 +199,3 @@ async function attendedBridge(args: {
   return NextResponse.json(data);
 }
 
-// Picks a Telnyx-owned phone number to use as the `from` (caller ID) of
-// the new outbound leg for a blind transfer. Telnyx rejects any non-
-// verified, non-account-owned number with "Unverified origination
-// number D51".
-//
-// Priority:
-//   1. The original call's recorded from_number or phone_number (whichever
-//      is ours), IF it matches an active row in phone_number_pool.
-//   2. TELNYX_PHONE_NUMBER env var — always guaranteed Telnyx-owned.
-async function resolveBlindTransferFrom(callControlId: string): Promise<string> {
-  const fallback = process.env.TELNYX_PHONE_NUMBER;
-  try {
-    const admin = createAdminClient();
-
-    const { data: logRow } = await admin
-      .from("call_logs")
-      .select("from_number, phone_number")
-      .eq("call_control_id", callControlId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const candidates = new Set<string>();
-    for (const raw of [logRow?.from_number, logRow?.phone_number]) {
-      if (!raw) continue;
-      candidates.add(raw);
-      if (raw.startsWith("+")) candidates.add(raw.slice(1));
-      else candidates.add(`+${raw}`);
-    }
-
-    if (candidates.size > 0) {
-      const { data: poolRows } = await admin
-        .from("phone_number_pool")
-        .select("phone_number")
-        .eq("is_active", true)
-        .in("phone_number", Array.from(candidates));
-
-      if (poolRows && poolRows.length > 0) {
-        const match = poolRows[0].phone_number as string;
-        console.log(
-          `[transfer] from resolved from pool ccid=${callControlId} from=${match}`
-        );
-        return match.startsWith("+") ? match : `+${match}`;
-      }
-    }
-  } catch (err) {
-    console.log(
-      `[transfer] from-lookup failed, using env fallback: ${
-        (err as Error).message
-      }`
-    );
-  }
-
-  if (!fallback) {
-    throw new Error(
-      "TELNYX_PHONE_NUMBER env var not set and no pool match — cannot set `from`"
-    );
-  }
-  const normalized = fallback.startsWith("+") ? fallback : `+${fallback}`;
-  console.log(
-    `[transfer] from using env fallback ccid=${callControlId} from=${normalized}`
-  );
-  return normalized;
-}

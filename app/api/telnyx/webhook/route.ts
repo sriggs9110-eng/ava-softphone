@@ -794,6 +794,44 @@ export async function POST(req: NextRequest) {
       } else {
         console.warn(`[Webhook] ${eventType} — no row found`);
       }
+
+      // Capture the OTHER leg's ccid for blind transfer via SIP REFER.
+      //
+      // Telnyx doesn't include a peer/other-leg ccid in the
+      // call.bridged payload — only call_control_id (this leg) and
+      // call_session_id (shared). We correlate by joining on session:
+      // find the call_logs row for this session, and if this event's
+      // ccid differs from the row's primary ccid, stamp it as
+      // external_ccid.
+      if (eventType === "call.bridged" && ccid && sessionId) {
+        const admin = getAdmin();
+        const { data: sessionRows } = await admin
+          .from("call_logs")
+          .select("id, call_control_id, external_ccid")
+          .eq("call_session_id", sessionId)
+          .order("created_at", { ascending: false })
+          .limit(2);
+        const rows = (sessionRows || []) as Array<{
+          id: string;
+          call_control_id: string | null;
+          external_ccid: string | null;
+        }>;
+        for (const r of rows) {
+          if (
+            r.call_control_id &&
+            r.call_control_id !== ccid &&
+            r.external_ccid !== ccid
+          ) {
+            await admin
+              .from("call_logs")
+              .update({ external_ccid: ccid })
+              .eq("id", r.id);
+            console.log(
+              `[bridge] stamped external_ccid=${ccid} on row=${r.id} primary=${r.call_control_id} session=${sessionId}`
+            );
+          }
+        }
+      }
       break;
     }
 
