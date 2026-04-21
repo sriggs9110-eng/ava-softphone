@@ -6,11 +6,17 @@ export async function POST(req: NextRequest) {
   const { to, from } = body;
 
   const apiKey = process.env.TELNYX_API_KEY;
-  const connectionId = process.env.TELNYX_CONNECTION_ID;
+  // POST /v2/calls expects a Call Control Application ID in
+  // connection_id, not the SIP credential connection ID. The agents
+  // register on the credential connection (TELNYX_CONNECTION_ID) for
+  // SIP endpoint auth; server-side call orchestration goes through the
+  // Call Control App so webhooks fire and phone numbers (which are
+  // now assigned to the app) route correctly.
+  const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
 
-  if (!apiKey || !connectionId) {
+  if (!apiKey || !callControlAppId) {
     return NextResponse.json(
-      { error: "Telnyx API not configured" },
+      { error: "Telnyx API not configured (missing TELNYX_API_KEY or TELNYX_CALL_CONTROL_APP_ID)" },
       { status: 500 }
     );
   }
@@ -26,7 +32,7 @@ export async function POST(req: NextRequest) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        connection_id: connectionId,
+        connection_id: callControlAppId,
         to,
         from: fromNumber,
         record: "record-from-answer",
