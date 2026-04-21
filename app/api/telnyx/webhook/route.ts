@@ -10,9 +10,108 @@ function getAdmin() {
   );
 }
 
+// Ring every listed agent's browser by dialing sip:<sip_username>@sip.telnyx.com
+// with link_to pointing at the inbound call and bridge_on_answer=true.
+// First agent to pick up gets bridged to the caller; losers are dropped by
+// Telnyx when the bridge wins the race.
+//
+// Why this is required: numbers moved to the Call Control App no longer
+// get Telnyx's native SIP-trunk INVITE fan-out. Without this orchestration
+// the inbound call reaches our webhook but never causes a browser SIP
+// INVITE, so agents never ring.
+async function fanOutToAgents({
+  callControlId,
+  from,
+  to,
+  members,
+  context,
+}: {
+  callControlId: string | undefined;
+  from: string;
+  to: string;
+  members: Array<{ user_id: string; sip_username: string | null }>;
+  context: string; // e.g. "group=sales" or "fallback=all-available"
+}): Promise<void> {
+  if (!callControlId) {
+    console.log(`[routing] ${context} — no call_control_id, skipping fan-out`);
+    return;
+  }
+  const apiKey = process.env.TELNYX_API_KEY;
+  const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
+  if (!apiKey || !callControlAppId) {
+    console.log(
+      `[routing] ${context} — missing TELNYX_API_KEY or TELNYX_CALL_CONTROL_APP_ID`
+    );
+    return;
+  }
+
+  const ringable = members.filter((m) => m.sip_username);
+  if (ringable.length === 0) {
+    console.log(
+      `[routing] ${context} — no members with sip_username, skipping fan-out`
+    );
+    return;
+  }
+
+  // `from` on the outbound SIP leg is the inbound leg's `to` — the number
+  // the caller dialed. That way the caller-ID shown to the agent is our
+  // own number (Telnyx requires the `from` to be account-verified). The
+  // original caller's number is carried in client_state so the UI can
+  // surface it on the browser.
+  const fromNumber = to.startsWith("+") ? to : `+${to}`;
+  const clientState = Buffer.from(
+    JSON.stringify({ inbound_ccid: callControlId, caller: from, called: to })
+  ).toString("base64");
+
+  const dials = ringable.map(async (m) => {
+    const sipUri = `sip:${m.sip_username}@sip.telnyx.com`;
+    const bodySent: Record<string, unknown> = {
+      to: sipUri,
+      from: fromNumber,
+      connection_id: callControlAppId,
+      link_to: callControlId,
+      bridge_on_answer: true,
+      bridge_intent: true,
+      timeout_secs: 25,
+      client_state: clientState,
+    };
+    try {
+      const res = await fetch("https://api.telnyx.com/v2/calls", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(bodySent),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail =
+          data?.errors?.[0]?.detail || data?.errors?.[0]?.title || "unknown";
+        console.error(
+          `[routing] ${context} fan-out to ${sipUri} FAILED ${res.status}: ${detail}`
+        );
+        return;
+      }
+      const newCcid = data?.data?.call_control_id || "(unknown)";
+      console.log(
+        `[routing] ${context} dialed agent user=${m.user_id} sip=${sipUri} newCcid=${newCcid}`
+      );
+    } catch (err) {
+      console.error(
+        `[routing] ${context} fan-out to ${sipUri} threw:`,
+        (err as Error).message
+      );
+    }
+  });
+
+  await Promise.all(dials);
+}
+
 // Dispatch ring-group fan-out: look up the group for the dialed number,
-// find available members, broadcast via Supabase Realtime, and schedule
-// a timeout hangup if nobody answers.
+// find available members, broadcast via Supabase Realtime, ring their
+// browsers via Call Control, and schedule a timeout hangup if nobody
+// answers. Returns true if a group matched (so caller can skip fallback).
 async function dispatchRingGroup({
   callControlId,
   from,
@@ -21,8 +120,8 @@ async function dispatchRingGroup({
   callControlId: string | undefined;
   from: string;
   to: string;
-}) {
-  if (!to) return;
+}): Promise<boolean> {
+  if (!to) return false;
 
   const admin = getAdmin();
 
@@ -41,17 +140,24 @@ async function dispatchRingGroup({
     .limit(1)
     .maybeSingle();
 
-  if (!group) return;
+  if (!group) return false;
 
   const { data: members } = await admin
     .from("ring_group_members")
-    .select("user_id, priority, softphone_users!inner(id, status, full_name)")
+    .select(
+      "user_id, priority, softphone_users!inner(id, status, full_name, sip_username)"
+    )
     .eq("group_id", group.id);
 
   type MemberRow = {
     user_id: string;
     priority: number;
-    softphone_users: { id: string; status: string; full_name: string };
+    softphone_users: {
+      id: string;
+      status: string;
+      full_name: string;
+      sip_username: string | null;
+    };
   };
 
   const rows = (members || []) as unknown as MemberRow[];
@@ -60,8 +166,11 @@ async function dispatchRingGroup({
     .sort((a, b) => a.priority - b.priority);
 
   if (available.length === 0) {
-    console.log(`[Webhook/ring] group=${group.name} — no available members`);
-    return;
+    console.log(`[routing] group=${group.name} — no available members`);
+    // A configured group with no one available is still a "match" — we
+    // want to skip the all-users fallback in that case, caller expects
+    // the group's own fallback_action (voicemail / hangup) to run.
+    return true;
   }
 
   // For simultaneous, notify everyone at once. For round_robin, still notify
@@ -70,6 +179,7 @@ async function dispatchRingGroup({
   const recipients = available.map((m) => ({
     user_id: m.user_id,
     name: m.softphone_users.full_name,
+    sip_username: m.softphone_users.sip_username,
   }));
   const memberIds = recipients.map((r) => r.user_id);
 
@@ -99,18 +209,27 @@ async function dispatchRingGroup({
       });
       await admin.removeChannel(ch);
     } catch (err) {
-      console.error(`[Webhook/ring] broadcast to ${r.user_id} failed:`, err);
+      console.error(`[routing] group=${group.name} broadcast to ${r.user_id} failed:`, err);
     }
   }
   console.log(
-    `[Webhook/ring] group=${group.name} notified ${recipients.length} members`
+    `[routing] group=${group.name} notified ${recipients.length} members`
   );
+
+  // Actually ring the agents' browsers via Call Control fan-out.
+  await fanOutToAgents({
+    callControlId,
+    from,
+    to,
+    members: recipients,
+    context: `group=${group.name}`,
+  });
 
   // Timeout enforcement. Best-effort in a serverless function — fires only
   // while the function instance is alive (Vercel limit applies). For robust
   // enforcement at scale, wire a cron to sweep ring_attempts.
   const apiKey = process.env.TELNYX_API_KEY;
-  if (!callControlId || !apiKey) return;
+  if (!callControlId || !apiKey) return true;
 
   after(async () => {
     await new Promise((res) =>
@@ -209,6 +328,90 @@ async function dispatchRingGroup({
     } catch (err) {
       console.error(`[Webhook/ring] timeout handler error:`, err);
     }
+  });
+
+  return true;
+}
+
+// Fallback dispatcher for inbound calls whose `to` doesn't match any
+// configured ring group. Broadcasts + rings every softphone_user who is
+// currently `available` and has a per-user SIP credential, so the call
+// doesn't silently die at the carrier. Stephen can still configure a
+// ring group for that number later to get specific routing; this just
+// keeps the base case working.
+async function dispatchFallback({
+  callControlId,
+  from,
+  to,
+}: {
+  callControlId: string | undefined;
+  from: string;
+  to: string;
+}) {
+  const admin = getAdmin();
+
+  const { data: users } = await admin
+    .from("softphone_users")
+    .select("id, full_name, status, sip_username")
+    .eq("status", "available")
+    .not("sip_username", "is", null);
+
+  const available = (users || []) as Array<{
+    id: string;
+    full_name: string | null;
+    status: string;
+    sip_username: string | null;
+  }>;
+
+  if (available.length === 0) {
+    console.log(
+      `[routing] fallback to=${to} from=${from} — no available users with sip_username; call will carrier-timeout`
+    );
+    return;
+  }
+
+  console.log(
+    `[routing] fallback to=${to} from=${from} — notifying ${available.length} available user(s)`
+  );
+
+  const memberIds = available.map((u) => u.id);
+  const payload = {
+    call_control_id: callControlId,
+    from,
+    to,
+    member_user_ids: memberIds,
+    sent_at: new Date().toISOString(),
+  };
+
+  for (const u of available) {
+    try {
+      const ch = admin.channel(`user:${u.id}`, {
+        config: { broadcast: { ack: false, self: false } },
+      });
+      await ch.subscribe();
+      await ch.send({
+        type: "broadcast",
+        event: "incoming_call",
+        payload,
+      });
+      await admin.removeChannel(ch);
+    } catch (err) {
+      console.error(
+        `[routing] fallback broadcast to ${u.id} failed:`,
+        err
+      );
+    }
+  }
+
+  await fanOutToAgents({
+    callControlId,
+    from,
+    to,
+    members: available.map((u) => ({
+      user_id: u.id,
+      sip_username: u.sip_username,
+    })),
+    context: "fallback=all-available",
   });
 }
 
@@ -462,12 +665,22 @@ export async function POST(req: NextRequest) {
     case "call.initiated": {
       const direction = payload?.direction as string | undefined;
 
-      // Ring group fan-out for inbound calls. Runs alongside existing
-      // bookkeeping — does not replace single-user inbound handling.
+      // Inbound routing:
+      //   1. Try the configured ring group for the called number.
+      //   2. If no group matches, fall back to ringing every available
+      //      softphone_user so the caller gets SOMEONE on the line.
+      // Both paths (a) broadcast a Realtime event so the UI decorates
+      // with caller info, and (b) dial each agent's SIP endpoint via
+      // the Call Control App so their WebRTC browser actually rings.
       if (direction === "incoming" || direction === "inbound") {
-        // Fire and await — dispatchRingGroup is cheap and no-ops if no
-        // matching group exists.
-        await dispatchRingGroup({ callControlId: ccid, from, to });
+        const groupMatched = await dispatchRingGroup({
+          callControlId: ccid,
+          from,
+          to,
+        });
+        if (!groupMatched) {
+          await dispatchFallback({ callControlId: ccid, from, to });
+        }
       }
 
       let row = await findRecentCall(payload);

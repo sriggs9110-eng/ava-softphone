@@ -83,6 +83,31 @@ export function useRingGroup({ userId, currentUserName }: UseRingGroupArgs) {
         console.log("[ring-group] incoming", payload);
         setGroupCall(payload as IncomingGroupCall);
       })
+      // Fallback inbound (no ring group matched the called number). Shape
+      // is a subset of IncomingGroupCall; we synthesize a sentinel group
+      // context so the same overlay path handles both. `group_id` of
+      // "__fallback__" signals the UI this is broadcast-to-all.
+      .on("broadcast", { event: "incoming_call" }, ({ payload }) => {
+        console.log("[ring-group] incoming (fallback)", payload);
+        const p = payload as {
+          call_control_id?: string;
+          from: string;
+          to: string;
+          member_user_ids: string[];
+          sent_at: string;
+        };
+        setGroupCall({
+          call_control_id: p.call_control_id,
+          from: p.from,
+          to: p.to,
+          group_id: "__fallback__",
+          group_name: "Direct",
+          strategy: "simultaneous",
+          member_user_ids: p.member_user_ids,
+          ring_timeout_seconds: 25,
+          sent_at: p.sent_at,
+        });
+      })
       .on("broadcast", { event: "ring_group_pickup" }, ({ payload }) => {
         console.log("[ring-group] pickup", payload);
         const p = payload as RingGroupPickup;
