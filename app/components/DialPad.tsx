@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 const KEYS = [
   ["1", "2", "3"],
@@ -29,6 +29,7 @@ interface DialPadProps {
   recentNumbers: string[];
   disabled?: boolean;
   initialNumber?: string;
+  inputRef?: React.RefObject<HTMLInputElement | null>;
 }
 
 export default function DialPad({
@@ -36,9 +37,20 @@ export default function DialPad({
   recentNumbers,
   disabled,
   initialNumber,
+  inputRef,
 }: DialPadProps) {
   const [number, setNumber] = useState(initialNumber || "+1");
   const [showRecents, setShowRecents] = useState(false);
+
+  // Sync when the parent pushes a new initialNumber (e.g. "Recently dialed"
+  // chip pick or post-voicemail call-back). Only updates if the incoming
+  // value is a real number — blank resets are ignored to preserve user typing.
+  useEffect(() => {
+    if (initialNumber && initialNumber !== number) {
+      setNumber(initialNumber);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialNumber]);
 
   const handleKey = useCallback((key: string) => {
     setNumber((prev) => prev + key);
@@ -68,6 +80,7 @@ export default function DialPad({
       {/* Number Input */}
       <div className="relative w-full">
         <input
+          ref={inputRef}
           type="tel"
           value={number}
           onChange={(e) => setNumber(e.target.value)}

@@ -17,6 +17,10 @@ import TranscriptsPage from "@/app/components/TranscriptsPage";
 import AfterCallWork from "@/app/components/AfterCallWork";
 import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
+import MissionControl from "@/app/components/home/MissionControl";
+import RecentlyDialed from "@/app/components/home/RecentlyDialed";
+import PostCallCelebration from "@/app/components/home/PostCallCelebration";
+import type { DashboardPayload } from "@/lib/home/dashboard";
 import { Loader2 } from "lucide-react";
 import { insertCallLog, fetchCallLogs, CallLog } from "@/lib/call-logs";
 import { CallHistoryEntry } from "@/app/lib/types";
@@ -128,6 +132,70 @@ export default function Home() {
     } catch {
       // ignore
     }
+  }, []);
+
+  // Ref for the dial-pad input so TopBar's "Make a call" button can focus it.
+  const dialPadInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Post-call celebration window: the 30s after hangup where we show the
+  // "That one's in the books" card with the score animating in. Tracked by
+  // the last call_log id + the window deadline timestamp.
+  const [postCall, setPostCall] = useState<
+    | { logId: string; until: number }
+    | null
+  >(null);
+  const prevActiveCallRef = useRef<typeof activeCall>(null);
+  useEffect(() => {
+    // Fires on transitions: active-call present → null triggers the window.
+    if (prevActiveCallRef.current && !activeCall) {
+      const logId = activeCallLogIdRef.current;
+      if (logId) {
+        setPostCall({ logId, until: Date.now() + 30_000 });
+      }
+    }
+    prevActiveCallRef.current = activeCall;
+  }, [activeCall]);
+  useEffect(() => {
+    if (!postCall) return;
+    const remaining = Math.max(0, postCall.until - Date.now());
+    const t = setTimeout(() => setPostCall(null), remaining);
+    return () => clearTimeout(t);
+  }, [postCall]);
+  const dismissPostCall = useCallback(() => setPostCall(null), []);
+
+  // Recently dialed chips — sourced from the dashboard endpoint so we don't
+  // duplicate the aggregation. Only used on the phone tab.
+  const [recentlyDialed, setRecentlyDialed] = useState<
+    DashboardPayload["recently_dialed"]
+  >([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/home/dashboard");
+        if (!res.ok || cancelled) return;
+        const body = (await res.json()) as DashboardPayload;
+        setRecentlyDialed(body.recently_dialed);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCall, postCall]);
+
+  // Cross-tab nav bus — ActivityRail / TeamPresence fire custom events that
+  // we translate to activePage changes. Keeps those components decoupled
+  // from the page-level state machine.
+  useEffect(() => {
+    const onNavigate = (e: Event) => {
+      const detail = (e as CustomEvent<{ page?: NavPage }>).detail;
+      if (detail?.page) setActivePage(detail.page);
+    };
+    window.addEventListener("pepper:navigate", onNavigate as EventListener);
+    return () =>
+      window.removeEventListener("pepper:navigate", onNavigate as EventListener);
   }, []);
 
   const { groupCall, pickupToast, claimPickup, dismissGroupCall } =
@@ -414,21 +482,17 @@ export default function Home() {
 
       {/* Main content */}
       <main className="flex-1 flex flex-col overflow-y-auto relative z-[1]">
-        <div className="w-full max-w-[1200px] mx-auto px-6 py-8">
-          {/* Page Header */}
-          <div className="mb-8">
-            <h1 className="text-3xl font-semibold text-navy font-display">
-              {pageInfo.title}
-            </h1>
-            <p className="text-[12px] text-slate mt-1 uppercase tracking-[0.5px] font-semibold">
-              {pageInfo.subtitle}
-            </p>
-          </div>
-
-          {/* Phone Page */}
-          {activePage === "phone" && (
-            <>
-              {activeCall ? (
+        {activePage === "phone" && user ? (
+          <MissionControl
+            currentUserId={user.id}
+            currentUserName={user.full_name}
+            isManager={!!isManager}
+            heroMode={
+              activeCall ? "on_call" : postCall ? "post_call" : "idle"
+            }
+            dialPadInputRef={dialPadInputRef}
+            hero={
+              activeCall ? (
                 <ActiveCallUI
                   call={activeCall}
                   onHangup={handleHangup}
@@ -443,25 +507,44 @@ export default function Home() {
                   countdown={acwCountdown}
                   onReady={handleAcwReady}
                 />
+              ) : postCall ? (
+                <PostCallCelebration
+                  callLogId={postCall.logId}
+                  onDismiss={dismissPostCall}
+                />
               ) : (
-                <div className="flex flex-col items-center gap-8">
-                  <DialPad
-                    onCall={handleMakeCall}
-                    recentNumbers={recentNumbers}
-                    disabled={connectionStatus !== "connected" || agentStatus === "dnd"}
-                    initialNumber={prefilledNumber}
-                  />
-                  {callHistory.length > 0 && (
-                    <div className="w-full max-w-md border-t border-border-subtle pt-6">
-                      <CallHistory
-                        entries={callHistory.slice(0, 5)}
-                        onDial={handleMakeCall}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
+                <DialPad
+                  onCall={handleMakeCall}
+                  recentNumbers={recentNumbers}
+                  disabled={
+                    connectionStatus !== "connected" || agentStatus === "dnd"
+                  }
+                  initialNumber={prefilledNumber}
+                  inputRef={dialPadInputRef}
+                />
+              )
+            }
+            belowHero={
+              !activeCall && !postCall && recentlyDialed.length > 0 ? (
+                <RecentlyDialed
+                  items={recentlyDialed}
+                  onPick={(n) => setPrefilledNumber(n)}
+                />
+              ) : undefined
+            }
+          />
+        ) : (
+        <div className="w-full max-w-[1200px] mx-auto px-6 py-8">
+          {/* Page Header — kept for non-phone tabs */}
+          {activePage !== "phone" && (
+            <div className="mb-8">
+              <h1 className="text-3xl font-semibold text-navy font-display">
+                {pageInfo.title}
+              </h1>
+              <p className="text-[12px] text-slate mt-1 uppercase tracking-[0.5px] font-semibold">
+                {pageInfo.subtitle}
+              </p>
+            </div>
           )}
 
           {/* History Page */}
@@ -490,6 +573,7 @@ export default function Home() {
 
           {/* Settings lives at /settings now — see sidebar nav. */}
         </div>
+        )}
       </main>
 
       {micError && <MicError message={micError} />}
