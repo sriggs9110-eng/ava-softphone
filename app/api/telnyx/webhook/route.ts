@@ -34,7 +34,9 @@ async function dispatchRingGroup({
 
   const { data: group } = await admin
     .from("ring_groups")
-    .select("id, name, inbound_number, strategy, ring_timeout_seconds, fallback_action")
+    .select(
+      "id, name, inbound_number, strategy, ring_timeout_seconds, fallback_action, voicemail_greeting_url"
+    )
     .in("inbound_number", Array.from(candidates))
     .limit(1)
     .maybeSingle();
@@ -133,8 +135,7 @@ async function dispatchRingGroup({
         `[Webhook/ring] ccid=${callControlId} timed out — fallback=${group.fallback_action}`
       );
 
-      // v1: only hangup. voicemail fallback is stubbed for a later iteration.
-      if (group.fallback_action === "hangup" || group.fallback_action === "voicemail") {
+      const hangupCall = async () => {
         const res = await fetch(
           `https://api.telnyx.com/v2/calls/${callControlId}/actions/hangup`,
           {
@@ -146,11 +147,234 @@ async function dispatchRingGroup({
           }
         );
         console.log(`[Webhook/ring] hangup status=${res.status}`);
+      };
+
+      // Voicemail path: answer server-side, record state, then the
+      // call.answered event handler (later in this file) plays the greeting.
+      if (
+        group.fallback_action === "voicemail" &&
+        group.voicemail_greeting_url
+      ) {
+        await admin.from("ring_group_call_state").upsert({
+          call_control_id: callControlId,
+          ring_group_id: group.id,
+          caller_number: from,
+          called_number: to,
+          state: "voicemail_answering",
+          updated_at: new Date().toISOString(),
+        });
+
+        const res = await fetch(
+          `https://api.telnyx.com/v2/calls/${callControlId}/actions/answer`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        if (!res.ok) {
+          const err = await res.text().catch(() => "");
+          console.error(
+            `[Webhook/ring] voicemail answer failed ${res.status}: ${err.slice(0, 300)}`
+          );
+          // Clean up state and hang up to avoid orphaned call leg.
+          await admin
+            .from("ring_group_call_state")
+            .update({ state: "done", updated_at: new Date().toISOString() })
+            .eq("call_control_id", callControlId);
+          await hangupCall();
+          return;
+        }
+        console.log(`[Webhook/ring] voicemail answer ok — awaiting call.answered`);
+        return;
       }
+
+      // Voicemail requested but no greeting recorded: safer to hang up than
+      // record silence the caller isn't prompted for.
+      if (
+        group.fallback_action === "voicemail" &&
+        !group.voicemail_greeting_url
+      ) {
+        console.warn(
+          `[Webhook/ring] group=${group.name} has voicemail fallback but no greeting — hanging up`
+        );
+        await hangupCall();
+        return;
+      }
+
+      // Plain hangup fallback.
+      await hangupCall();
     } catch (err) {
       console.error(`[Webhook/ring] timeout handler error:`, err);
     }
   });
+}
+
+// Advance the voicemail flow: play the greeting when Telnyx confirms the
+// answer, then start recording when the greeting finishes, then harvest the
+// recording when it's saved.
+async function handleVoicemailEvent({
+  eventType,
+  callControlId,
+}: {
+  eventType: string;
+  callControlId: string | undefined;
+}): Promise<boolean> {
+  if (!callControlId) return false;
+  const apiKey = process.env.TELNYX_API_KEY;
+  if (!apiKey) return false;
+
+  const admin = getAdmin();
+  const { data: state } = await admin
+    .from("ring_group_call_state")
+    .select(
+      "call_control_id, ring_group_id, caller_number, called_number, state"
+    )
+    .eq("call_control_id", callControlId)
+    .maybeSingle();
+  if (!state) return false;
+
+  if (
+    eventType === "call.answered" &&
+    state.state === "voicemail_answering"
+  ) {
+    const { data: group } = await admin
+      .from("ring_groups")
+      .select("voicemail_greeting_url")
+      .eq("id", state.ring_group_id)
+      .single();
+    if (!group?.voicemail_greeting_url) {
+      console.warn(
+        `[Webhook/voicemail] answered but no greeting on group=${state.ring_group_id}`
+      );
+      return true;
+    }
+    const res = await fetch(
+      `https://api.telnyx.com/v2/calls/${callControlId}/actions/playback_start`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ audio_url: group.voicemail_greeting_url }),
+      }
+    );
+    console.log(`[Webhook/voicemail] playback_start status=${res.status}`);
+    await admin
+      .from("ring_group_call_state")
+      .update({
+        state: "voicemail_playing_greeting",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("call_control_id", callControlId);
+    return true;
+  }
+
+  if (
+    (eventType === "call.playback.ended" || eventType === "call.playback_ended") &&
+    state.state === "voicemail_playing_greeting"
+  ) {
+    const res = await fetch(
+      `https://api.telnyx.com/v2/calls/${callControlId}/actions/record_start`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          format: "mp3",
+          channels: "single",
+          max_length: 120,
+        }),
+      }
+    );
+    console.log(`[Webhook/voicemail] record_start status=${res.status}`);
+    await admin
+      .from("ring_group_call_state")
+      .update({
+        state: "voicemail_recording",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("call_control_id", callControlId);
+    return true;
+  }
+
+  return false;
+}
+
+async function harvestVoicemailRecording({
+  callControlId,
+  recordingUrl,
+  recordingId,
+  durationSeconds,
+}: {
+  callControlId: string | undefined;
+  recordingUrl: string | null;
+  recordingId: string | null;
+  durationSeconds: number | null;
+}): Promise<boolean> {
+  if (!callControlId || !recordingUrl) return false;
+  const admin = getAdmin();
+
+  const { data: state } = await admin
+    .from("ring_group_call_state")
+    .select("ring_group_id, caller_number, called_number, state")
+    .eq("call_control_id", callControlId)
+    .maybeSingle();
+  if (!state || state.state !== "voicemail_recording") return false;
+
+  const { data: inserted, error } = await admin
+    .from("voicemails")
+    .insert({
+      ring_group_id: state.ring_group_id,
+      caller_number: state.caller_number || "",
+      called_number: state.called_number || "",
+      recording_url: recordingUrl,
+      recording_telnyx_id: recordingId,
+      duration_seconds: durationSeconds,
+      transcript_status: "pending",
+      status: "new",
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("[Webhook/voicemail] insert failed:", error.message);
+    return true;
+  }
+  console.log(`[Webhook/voicemail] inserted voicemail ${inserted.id}`);
+
+  await admin
+    .from("ring_group_call_state")
+    .update({ state: "done", updated_at: new Date().toISOString() })
+    .eq("call_control_id", callControlId);
+
+  // Kick off transcription in the background.
+  after(async () => {
+    try {
+      const origin = process.env.NEXT_PUBLIC_APP_URL || "";
+      if (!origin) {
+        console.warn(
+          "[Webhook/voicemail] NEXT_PUBLIC_APP_URL unset — skipping auto-transcribe"
+        );
+        return;
+      }
+      const r = await fetch(`${origin}/api/ai/transcribe-voicemail`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voicemail_id: inserted.id }),
+      });
+      console.log(`[Webhook/voicemail] auto-transcribe status=${r.status}`);
+    } catch (err) {
+      console.error("[Webhook/voicemail] auto-transcribe threw:", err);
+    }
+  });
+
+  return true;
 }
 
 function cleanNumber(raw: string): string {
@@ -293,8 +517,24 @@ export async function POST(req: NextRequest) {
       break;
     }
 
+    case "call.playback.ended":
+    case "call.playback_ended": {
+      // Voicemail flow: greeting finished → start recording.
+      await handleVoicemailEvent({ eventType, callControlId: ccid });
+      break;
+    }
+
     case "call.answered":
     case "call.bridged": {
+      // Voicemail flow hijacks call.answered: when the call we just answered
+      // belongs to a ring_group_call_state row, play the greeting instead of
+      // starting dual-channel call recording.
+      const vmHandled = await handleVoicemailEvent({
+        eventType,
+        callControlId: ccid,
+      });
+      if (vmHandled) break;
+
       if (apiKey && ccid) {
         try {
           const res = await fetch(
@@ -380,9 +620,22 @@ export async function POST(req: NextRequest) {
       const recordingId = (payload?.recording_id ||
         payload?.id ||
         (payload as Record<string, unknown>)?.public_recording_id) as string | undefined;
+      const recDuration = (payload?.duration_millis as number | undefined)
+        ? Math.round((payload?.duration_millis as number) / 1000)
+        : (payload?.duration as number | undefined) ?? null;
       console.log(
         `[Webhook] Recording url=${url} recording_id=${recordingId} ccid=${ccid} session=${recSessionId} from=${from} to=${to}`
       );
+
+      // Voicemail path: when this recording belongs to a voicemail flow, we
+      // harvest it into the voicemails table and skip the call_logs match.
+      const harvested = await harvestVoicemailRecording({
+        callControlId: ccid,
+        recordingUrl: url || null,
+        recordingId: recordingId || null,
+        durationSeconds: recDuration,
+      });
+      if (harvested) break;
 
       if (url) {
         const admin = getAdmin();

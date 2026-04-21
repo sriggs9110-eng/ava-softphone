@@ -9,16 +9,19 @@ import {
   FileText,
   Settings,
   LogOut,
+  Voicemail,
 } from "lucide-react";
 import { AgentStatus, ConnectionStatus } from "@/app/lib/types";
 import ConnectionQuality, { QualityLevel } from "@/app/components/ConnectionQuality";
 import { ShortcutsButton } from "@/app/components/KeyboardShortcuts";
 import { useAuth } from "@/lib/auth-context";
+import { createClient } from "@/lib/supabase/client";
 import PepperMascot from "@/components/pepper/PepperMascot";
 
 export type NavPage =
   | "phone"
   | "history"
+  | "voicemails"
   | "monitor"
   | "reports"
   | "transcripts"
@@ -77,9 +80,22 @@ export default function Sidebar({
 }: SidebarProps) {
   const { user, isManager, logout } = useAuth();
 
-  const navItems: { page: NavPage; icon: typeof Phone; label: string }[] = [
+  const unreadVoicemails = useUnreadVoicemails();
+
+  const navItems: {
+    page: NavPage;
+    icon: typeof Phone;
+    label: string;
+    badge?: number;
+  }[] = [
     { page: "phone", icon: Phone, label: "Phone" },
     { page: "history", icon: Clock, label: "History" },
+    {
+      page: "voicemails",
+      icon: Voicemail,
+      label: "Voicemails",
+      badge: unreadVoicemails,
+    },
     // Reports is role-aware at the API level — agents see only their own stats.
     { page: "reports", icon: BarChart3, label: "Reports" },
   ];
@@ -99,7 +115,7 @@ export default function Sidebar({
       </div>
 
       {/* Nav Items */}
-      {navItems.map(({ page, icon: Icon, label }) => {
+      {navItems.map(({ page, icon: Icon, label, badge }) => {
         const active = activePage === page;
         return (
           <button
@@ -121,6 +137,14 @@ export default function Sidebar({
             {page === "phone" && agentStatus === "dnd" && (
               <div className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-coral border-2 border-navy" />
             )}
+            {badge && badge > 0 ? (
+              <span
+                className="absolute -top-1 -right-1 min-w-[18px] h-[18px] rounded-full bg-coral border-2 border-navy text-white text-[10px] font-bold flex items-center justify-center px-1 tabular-nums"
+                aria-label={`${badge} unread`}
+              >
+                {badge > 99 ? "99+" : badge}
+              </span>
+            ) : null}
             <div className="absolute left-full ml-3 px-2.5 py-1.5 bg-navy border-2 border-banana rounded-lg text-[11px] text-white whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
               {label}
             </div>
@@ -312,4 +336,41 @@ function UserMenu({
       )}
     </div>
   );
+}
+
+// Unread voicemails badge — Supabase Realtime subscription on the voicemails
+// table so the number updates without polling. On any INSERT/UPDATE we
+// refetch the count (cheap: a head-count query with filter).
+function useUnreadVoicemails(): number {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    const supabase = createClient();
+
+    let cancelled = false;
+    const refresh = async () => {
+      const { count: c } = await supabase
+        .from("voicemails")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "new");
+      if (!cancelled && typeof c === "number") setCount(c);
+    };
+
+    refresh();
+    const channel = supabase
+      .channel("voicemails-unread")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "voicemails" },
+        () => refresh()
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  return count;
 }

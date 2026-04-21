@@ -25,6 +25,7 @@ import { useRouter } from "next/navigation";
 const PAGE_TITLES: Record<NavPage, { title: string; subtitle: string }> = {
   phone: { title: "Phone", subtitle: "Make or receive calls" },
   history: { title: "Call History", subtitle: "Review past calls & AI analysis" },
+  voicemails: { title: "Voicemails", subtitle: "Ring-group messages" },
   monitor: { title: "Live Monitoring", subtitle: "Manager view" },
   reports: { title: "Reports", subtitle: "Call analytics & metrics" },
   transcripts: { title: "Transcripts", subtitle: "Search call transcripts" },
@@ -113,6 +114,21 @@ export default function Home() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [supabaseEntries, setSupabaseEntries] = useState<CallHistoryEntry[]>([]);
   const activeCallLogIdRef = useRef<string | null>(null);
+
+  // Voicemails "Call back" stashes the target number here. We consume it once
+  // on mount so a refresh doesn't re-dial stale numbers.
+  const [prefilledNumber, setPrefilledNumber] = useState<string | undefined>();
+  useEffect(() => {
+    try {
+      const n = sessionStorage.getItem("pepper:dial-number");
+      if (n) {
+        setPrefilledNumber(n);
+        sessionStorage.removeItem("pepper:dial-number");
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const { groupCall, pickupToast, claimPickup, dismissGroupCall } =
     useRingGroup({ userId: user?.id ?? null, currentUserName: user?.full_name });
@@ -311,6 +327,10 @@ export default function Home() {
             router.push("/settings");
             return;
           }
+          if (page === "voicemails") {
+            router.push("/voicemails");
+            return;
+          }
           setActivePage(page);
         }}
         connectionStatus={connectionStatus}
@@ -429,6 +449,7 @@ export default function Home() {
                     onCall={handleMakeCall}
                     recentNumbers={recentNumbers}
                     disabled={connectionStatus !== "connected" || agentStatus === "dnd"}
+                    initialNumber={prefilledNumber}
                   />
                   {callHistory.length > 0 && (
                     <div className="w-full max-w-md border-t border-border-subtle pt-6">

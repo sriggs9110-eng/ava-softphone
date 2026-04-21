@@ -31,7 +31,9 @@ export async function GET() {
   const admin = createAdminClient();
   const { data: groups, error } = await admin
     .from("ring_groups")
-    .select("*")
+    .select(
+      "id, name, inbound_number, strategy, ring_timeout_seconds, fallback_action, voicemail_greeting_url, voicemail_greeting_filename, created_at"
+    )
     .order("created_at", { ascending: false });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 

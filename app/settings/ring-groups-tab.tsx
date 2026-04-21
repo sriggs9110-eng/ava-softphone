@@ -1,7 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, Trash2, X, Edit3 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Loader2,
+  Plus,
+  Trash2,
+  X,
+  Edit3,
+  Mic,
+  Square,
+  Upload,
+  Play,
+  RotateCw,
+} from "lucide-react";
 
 interface MemberRef {
   user_id: string;
@@ -15,6 +26,8 @@ interface GroupRow {
   strategy: "simultaneous" | "round_robin";
   ring_timeout_seconds: number;
   fallback_action: "voicemail" | "hangup";
+  voicemail_greeting_url: string | null;
+  voicemail_greeting_filename: string | null;
   created_at: string;
   members: MemberRef[];
   member_count: number;
@@ -371,18 +384,34 @@ function GroupModal({
           <Field label="Fallback">
             <div className="flex flex-col gap-2">
               <RadioRow
+                checked={fallback === "voicemail"}
+                onChange={() => setFallback("voicemail")}
+                label="Voicemail"
+              />
+              <RadioRow
                 checked={fallback === "hangup"}
                 onChange={() => setFallback("hangup")}
                 label="Hang up"
               />
-              <RadioRow
-                checked={fallback === "voicemail"}
-                onChange={() => setFallback("voicemail")}
-                label="Voicemail (coming soon)"
-                disabled
-              />
             </div>
           </Field>
+
+          {fallback === "voicemail" && existing && (
+            <Field label="Voicemail greeting">
+              <GreetingRecorder
+                groupId={existing.id}
+                initialUrl={existing.voicemail_greeting_url}
+                initialFilename={existing.voicemail_greeting_filename}
+              />
+            </Field>
+          )}
+          {fallback === "voicemail" && !existing && (
+            <div className="text-[12px] text-slate bg-cream-2 border-2 border-navy rounded-[10px] px-3 py-2">
+              Save the group first, then re-open to record or upload a
+              voicemail greeting. Callers who time out without a greeting are
+              hung up instead of recorded.
+            </div>
+          )}
 
           <Field label="Members">
             <div className="border-2 border-navy rounded-[10px] max-h-56 overflow-y-auto divide-y-2 divide-navy/10">
@@ -498,5 +527,269 @@ function RadioRow({
       />
       {label}
     </label>
+  );
+}
+
+/* ---------------- Greeting recorder ---------------- */
+
+const MAX_RECORDING_SEC = 30;
+
+function GreetingRecorder({
+  groupId,
+  initialUrl,
+  initialFilename,
+}: {
+  groupId: string;
+  initialUrl: string | null;
+  initialFilename: string | null;
+}) {
+  const [storedUrl, setStoredUrl] = useState(initialUrl);
+  const [storedFilename, setStoredFilename] = useState(initialFilename);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+  const [previewFilename, setPreviewFilename] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoStopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopMediaTracks = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }, []);
+
+  const clearTimers = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (autoStopRef.current) clearTimeout(autoStopRef.current);
+    timerRef.current = null;
+    autoStopRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearTimers();
+      stopMediaTracks();
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startRecording = async () => {
+    setError(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+    setPreviewBlob(null);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mr = new MediaRecorder(stream, {
+        mimeType: MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : "audio/mp4",
+      });
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      mr.onstop = () => {
+        const mime = mr.mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: mime });
+        chunksRef.current = [];
+        const url = URL.createObjectURL(blob);
+        setPreviewBlob(blob);
+        setPreviewUrl(url);
+        setPreviewFilename(
+          `greeting-${new Date().toISOString().slice(0, 19)}.webm`
+        );
+        stopMediaTracks();
+      };
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setRecording(true);
+      setElapsed(0);
+      timerRef.current = setInterval(() => {
+        setElapsed((e) => e + 1);
+      }, 1000);
+      autoStopRef.current = setTimeout(() => {
+        stopRecording();
+      }, MAX_RECORDING_SEC * 1000);
+    } catch (err) {
+      setError(
+        "Microphone access denied or unavailable. " +
+          ((err as Error).message || "")
+      );
+    }
+  };
+
+  const stopRecording = () => {
+    clearTimers();
+    setRecording(false);
+    mediaRecorderRef.current?.stop();
+    mediaRecorderRef.current = null;
+  };
+
+  const onFilePicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      setError("File too large — max 2 MB");
+      e.target.value = "";
+      return;
+    }
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    setPreviewBlob(file);
+    setPreviewFilename(file.name);
+  };
+
+  const saveGreeting = async () => {
+    if (!previewBlob) return;
+    setSaving(true);
+    setError(null);
+    const form = new FormData();
+    const filename = previewFilename || "greeting.webm";
+    form.append("file", previewBlob, filename);
+    const res = await fetch(`/api/admin/ring-groups/${groupId}/greeting`, {
+      method: "POST",
+      body: form,
+    });
+    setSaving(false);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      setError(d.error || `Save failed (${res.status})`);
+      return;
+    }
+    const body = (await res.json()) as { url: string; filename: string };
+    setStoredUrl(body.url);
+    setStoredFilename(body.filename);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+    setPreviewBlob(null);
+    setPreviewFilename(null);
+  };
+
+  const removeGreeting = async () => {
+    if (!confirm("Remove the current greeting?")) return;
+    setSaving(true);
+    const res = await fetch(`/api/admin/ring-groups/${groupId}/greeting`, {
+      method: "DELETE",
+    });
+    setSaving(false);
+    if (res.ok) {
+      setStoredUrl(null);
+      setStoredFilename(null);
+    }
+  };
+
+  return (
+    <div className="bg-cream-3 border-2 border-navy rounded-[10px] p-3 space-y-3">
+      {storedUrl && !previewUrl && (
+        <div>
+          <p className="text-[11px] text-navy uppercase tracking-wider font-bold mb-1">
+            Current greeting
+          </p>
+          <div className="flex items-center gap-2">
+            <audio controls src={storedUrl} className="h-8 flex-1" preload="metadata" />
+          </div>
+          <div className="flex items-center justify-between mt-2 text-[11px] text-slate">
+            <span className="truncate">{storedFilename || "greeting"}</span>
+            <button
+              onClick={removeGreeting}
+              disabled={saving}
+              className="text-coral-deep hover:underline font-semibold"
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {!recording && !previewUrl && (
+          <button
+            type="button"
+            onClick={startRecording}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-banana border-[2.5px] border-navy text-navy text-sm font-bold shadow-pop-sm shadow-pop-hover"
+          >
+            <Mic size={14} />
+            {storedUrl ? "Record new" : "Record greeting"}
+          </button>
+        )}
+        {recording && (
+          <button
+            type="button"
+            onClick={stopRecording}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-coral border-[2.5px] border-navy text-white text-sm font-bold shadow-pop-sm"
+          >
+            <Square size={14} />
+            Stop · {elapsed}s / {MAX_RECORDING_SEC}s
+          </button>
+        )}
+        {!recording && !previewUrl && (
+          <label className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-paper border-2 border-navy text-navy text-sm font-semibold shadow-pop-sm shadow-pop-hover cursor-pointer">
+            <Upload size={14} />
+            Upload file
+            <input
+              type="file"
+              accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/m4a,audio/x-m4a,audio/webm,audio/*"
+              className="hidden"
+              onChange={onFilePicked}
+            />
+          </label>
+        )}
+      </div>
+
+      {previewUrl && (
+        <div>
+          <p className="text-[11px] text-navy uppercase tracking-wider font-bold mb-1">
+            Preview
+          </p>
+          <audio controls src={previewUrl} className="h-8 w-full" preload="metadata" />
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <button
+              type="button"
+              onClick={saveGreeting}
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-leaf border-[2.5px] border-navy text-white text-[12px] font-bold shadow-pop-sm shadow-pop-hover disabled:opacity-50"
+            >
+              {saving ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+              Save greeting
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (previewUrl) URL.revokeObjectURL(previewUrl);
+                setPreviewUrl(null);
+                setPreviewBlob(null);
+                setPreviewFilename(null);
+              }}
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-paper border-2 border-navy text-navy text-[12px] font-semibold shadow-pop-sm shadow-pop-hover"
+            >
+              <RotateCw size={12} />
+              Re-record
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <p className="text-[11px] text-coral-deep font-semibold">{error}</p>
+      )}
+      <p className="text-[11px] text-slate leading-snug">
+        Up to 30 seconds. Mention the company and ask the caller to leave a
+        number, best time to call back, and the reason they&rsquo;re reaching
+        out.
+      </p>
+    </div>
   );
 }
