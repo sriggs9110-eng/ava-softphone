@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, Trash2, X } from "lucide-react";
+import { Loader2, Plus, Trash2, X, Check, AlertTriangle, RefreshCw } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 
 interface UserRow {
@@ -11,6 +11,9 @@ interface UserRow {
   role: string;
   status: string;
   extension: string | null;
+  sip_username: string | null;
+  sip_credential_id: string | null;
+  sip_provisioned_at: string | null;
 }
 
 const ROLE_BADGE: Record<string, string> = {
@@ -33,6 +36,8 @@ export default function UsersTab() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [provisioning, setProvisioning] = useState<string | null>(null);
+  const [provisionError, setProvisionError] = useState<Record<string, string>>({});
 
   const fetchUsers = useCallback(async () => {
     const res = await fetch("/api/admin/users");
@@ -57,6 +62,49 @@ export default function UsersTab() {
     await fetch(`/api/admin/users?id=${id}`, { method: "DELETE" });
     setUsers((prev) => prev.filter((u) => u.id !== id));
     setDeleteConfirm(null);
+  };
+
+  const handleProvision = async (id: string) => {
+    setProvisioning(id);
+    setProvisionError((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await fetch("/api/admin/users/provision-sip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setProvisionError((prev) => ({
+          ...prev,
+          [id]: data.error || "Provision failed",
+        }));
+      } else {
+        setUsers((prev) =>
+          prev.map((u) =>
+            u.id === id
+              ? {
+                  ...u,
+                  sip_username: data.sip_username,
+                  sip_credential_id: data.credential_id,
+                  sip_provisioned_at: new Date().toISOString(),
+                }
+              : u
+          )
+        );
+      }
+    } catch (err) {
+      setProvisionError((prev) => ({
+        ...prev,
+        [id]: err instanceof Error ? err.message : "Network error",
+      }));
+    } finally {
+      setProvisioning(null);
+    }
   };
 
   if (loading) {
@@ -87,6 +135,7 @@ export default function UsersTab() {
               <Th>Email</Th>
               <Th>Role</Th>
               <Th>Status</Th>
+              <Th>SIP</Th>
               <th className="px-5 py-3" />
             </tr>
           </thead>
@@ -148,6 +197,14 @@ export default function UsersTab() {
                     </span>
                   </div>
                 </td>
+                <td className="px-5 py-3.5">
+                  <SipStatusCell
+                    user={u}
+                    provisioning={provisioning === u.id}
+                    error={provisionError[u.id]}
+                    onProvision={() => handleProvision(u.id)}
+                  />
+                </td>
                 <td className="px-5 py-3.5 text-right">
                   {u.id !== currentUser?.id && (
                     <>
@@ -204,6 +261,69 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
+function SipStatusCell({
+  user,
+  provisioning,
+  error,
+  onProvision,
+}: {
+  user: UserRow;
+  provisioning: boolean;
+  error: string | undefined;
+  onProvision: () => void;
+}) {
+  if (provisioning) {
+    return (
+      <div className="flex items-center gap-1.5 text-[12px] text-navy-2">
+        <Loader2 size={13} className="animate-spin" />
+        <span>Provisioning…</span>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="flex items-center gap-2">
+        <span
+          title={error}
+          className="flex items-center gap-1 text-[12px] text-coral font-semibold"
+        >
+          <AlertTriangle size={13} />
+          Failed
+        </span>
+        <button
+          onClick={onProvision}
+          className="px-2 py-0.5 rounded-full bg-banana border-[1.5px] border-navy text-navy text-[10px] font-bold flex items-center gap-1"
+        >
+          <RefreshCw size={10} />
+          Retry
+        </button>
+      </div>
+    );
+  }
+  if (user.sip_credential_id && user.sip_username) {
+    return (
+      <div className="flex items-center gap-1.5 text-[12px] text-leaf font-semibold">
+        <Check size={13} />
+        <span title={user.sip_username}>Provisioned</span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2">
+      <span className="flex items-center gap-1 text-[12px] text-navy-2/80">
+        <AlertTriangle size={13} />
+        Missing
+      </span>
+      <button
+        onClick={onProvision}
+        className="px-2 py-0.5 rounded-full bg-cream-3 border-[1.5px] border-navy text-navy text-[10px] font-bold"
+      >
+        Provision now
+      </button>
+    </div>
+  );
+}
+
 function AddUserModal({
   onClose,
   onCreated,
@@ -236,6 +356,9 @@ function AddUserModal({
       return;
     }
 
+    // User created. If SIP credential provisioning failed the row still
+    // exists and the Users table will surface a ⚠ Failed status with a
+    // Retry button — no need to block the modal here.
     onCreated();
   };
 

@@ -258,13 +258,26 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
-              // With Telnyx simultaneous_ringing enabled on the shared
-              // credential, every registered agent gets the WebRTC INVITE
-              // on every inbound ring-group call. Auto-reject locally if
-              // the rep can't reasonably take it — Telnyx reads the
-              // hangup as a decline and keeps ringing the rest of the
-              // group. Without this, a mid-call or wrap-up rep would hear
-              // a second call ringing over their current one.
+              // Defense-in-depth auto-reject. With per-user SIP
+              // credentials the server-side dispatchRingGroup already
+              // filters out unavailable members before inviting — so in
+              // theory a mid-call / wrap-up / DND agent shouldn't be
+              // receiving an INVITE here at all. In practice we keep all
+              // three conditions as a client-side safety net:
+              //
+              //   - DND: the rep explicitly opted out; reject no matter
+              //     what the routing decided.
+              //   - on-call: if a stale registration or race somehow
+              //     invited an already-busy rep, a second call ringing
+              //     over the active call is jarring.
+              //   - after-call-work: same race protection; ACW is a
+              //     short recovery window and forcing a pick-up during
+              //     it hurts call quality.
+              //
+              // If any of these fire in practice it's a signal to
+              // investigate the ring-group dispatch, not remove the
+              // guard. Hangup reads as a decline at the SIP layer so
+              // Telnyx continues ringing the rest of the group.
               const cannotTake =
                 agentStatus === "dnd" ||
                 agentStatus === "on-call" ||
