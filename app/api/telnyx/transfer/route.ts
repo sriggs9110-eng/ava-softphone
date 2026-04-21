@@ -81,20 +81,17 @@ async function blindTransfer(args: {
 }): Promise<NextResponse> {
   const { callControlId, to, apiKey } = args;
 
-  // Blind transfer uses SIP REFER on the EXTERNAL leg of the rep's
-  // existing bridge. The prior approach (POST /v2/calls with link_to
-  // + bridge_on_answer) collapsed the original bridge before Telnyx
-  // could complete the new bridge — rep + external caller both
-  // dropped. REFER asks Telnyx to redirect the external party to a
-  // new destination while keeping the bridge intact, then the rep's
-  // WebRTC leg drops naturally when its peer disappears.
+  // Blind transfer uses /actions/transfer on the EXTERNAL leg of the
+  // rep's existing bridge. REFER was rejected by Telnyx because it
+  // can't target a SIP address on their own domain; for PSTN hand-off,
+  // /actions/transfer with a plain phone number is the right primitive.
+  // The key correctness win is still targeting the external leg, not
+  // the rep's WebRTC leg — the prior version transferred the rep's
+  // side which collapsed the bridge.
   //
-  // To issue REFER we need the external leg's ccid, not the rep's
-  // WebRTC ccid. We captured it into call_logs.external_ccid on
-  // call.bridged — see webhook handler. If it's missing (e.g. call
-  // predates the feature), we fall back to the rep's ccid with a
-  // [transfer/fallback] warning; that path is the old broken one but
-  // strictly no worse than refusing the transfer.
+  // external_ccid is stamped on call_logs by the call.bridged webhook
+  // handler. If it's not populated (e.g. call predates the feature),
+  // we fall back to the rep's ccid with a [transfer/fallback] warning.
 
   const admin = createAdminClient();
   const { data: logRow } = await admin
@@ -111,23 +108,33 @@ async function blindTransfer(args: {
   const targetCcid = externalCcid || callControlId;
   if (!externalCcid) {
     console.log(
-      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} — REFER against rep's leg (may fail)`
+      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} — transferring rep's leg (may fail)`
     );
   }
 
-  // Telnyx expects a SIP URI. For PSTN destinations, route via
-  // sip:+E164@sip.telnyx.com — Telnyx handles the carrier hop.
+  // `from` on /actions/transfer must be a Telnyx-owned number. Without
+  // it, Telnyx defaults to the original call's `to`, which for the
+  // external leg is the PSTN destination — rejected with "Unverified
+  // origination number D51". Priority: the business number that was
+  // used as caller-ID on the original call (from_number stamped by the
+  // webhook), then TELNYX_PHONE_NUMBER.
   const normalizedTo = to.startsWith("+") ? to : `+${to}`;
-  const sipAddress = `sip:${normalizedTo}@sip.telnyx.com`;
+  const storedFrom = logRow?.from_number as string | null | undefined;
+  const envFrom = process.env.TELNYX_PHONE_NUMBER;
+  let fromNumber: string | null = null;
+  if (storedFrom && /^\+?\d{7,15}$/.test(storedFrom)) {
+    fromNumber = storedFrom.startsWith("+") ? storedFrom : `+${storedFrom}`;
+  } else if (envFrom) {
+    fromNumber = envFrom.startsWith("+") ? envFrom : `+${envFrom}`;
+  }
 
-  const bodySent: Record<string, unknown> = {
-    sip_address: sipAddress,
-  };
+  const bodySent: Record<string, unknown> = { to: normalizedTo };
+  if (fromNumber) bodySent.from = fromNumber;
 
-  const endpoint = `${TELNYX_API}/calls/${targetCcid}/actions/refer`;
+  const endpoint = `${TELNYX_API}/calls/${targetCcid}/actions/transfer`;
 
   console.log(
-    `[transfer/refer] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${to} bodySent=${JSON.stringify(
+    `[transfer/blind] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${normalizedTo} bodySent=${JSON.stringify(
       bodySent
     )}`
   );
@@ -143,7 +150,7 @@ async function blindTransfer(args: {
   const data = await res.json().catch(() => ({}));
 
   console.log(
-    `[transfer/refer] response status=${res.status} responseBody=${JSON.stringify(
+    `[transfer/blind] response status=${res.status} responseBody=${JSON.stringify(
       data
     )}`
   );
@@ -152,15 +159,15 @@ async function blindTransfer(args: {
     const detail =
       data?.errors?.[0]?.detail ||
       data?.errors?.[0]?.title ||
-      "SIP REFER failed";
+      "Blind transfer failed";
     console.log(
-      `[transfer/refer] FAILED ${res.status} targetCcid=${targetCcid} to=${to}: ${detail}`
+      `[transfer/blind] FAILED ${res.status} targetCcid=${targetCcid} to=${normalizedTo}: ${detail}`
     );
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
   console.log(
-    `[transfer/refer] ok targetCcid=${targetCcid} to=${to} — waiting for call.refer.* webhooks`
+    `[transfer/blind] ok targetCcid=${targetCcid} to=${normalizedTo} — waiting for hangup of rep's leg`
   );
 
   return NextResponse.json({
