@@ -258,7 +258,18 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
-              if (agentStatus === "dnd") {
+              // With Telnyx simultaneous_ringing enabled on the shared
+              // credential, every registered agent gets the WebRTC INVITE
+              // on every inbound ring-group call. Auto-reject locally if
+              // the rep can't reasonably take it — Telnyx reads the
+              // hangup as a decline and keeps ringing the rest of the
+              // group. Without this, a mid-call or wrap-up rep would hear
+              // a second call ringing over their current one.
+              const cannotTake =
+                agentStatus === "dnd" ||
+                agentStatus === "on-call" ||
+                agentStatus === "after-call-work";
+              if (cannotTake) {
                 call.hangup();
                 return;
               }
