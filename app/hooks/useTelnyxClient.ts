@@ -548,33 +548,89 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     callRef.current.dtmf(digit);
   }, []);
 
-  // Warm / attended transfer: dial the target first so the rep can talk
-  // to them, then press Complete Transfer (which fires `completeTransfer`
-  // below and calls Telnyx's bridge primitive).
-  const initiateTransfer = useCallback((targetNumber: string) => {
-    if (!clientRef.current || !callRef.current) return;
-    transferDebug("initiateTransfer (warm) — dialing target", { targetNumber });
-    callRef.current.hold();
-    setActiveCall((prev) =>
-      prev ? { ...prev, isHeld: true, status: "held" } : null
-    );
-    const tCall = clientRef.current.newCall({
-      destinationNumber: targetNumber,
-      callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
-      audio: true,
-      video: false,
-      remoteElement: audioRef.current || undefined,
-    });
-    transferCallRef.current = tCall;
-    setTransferCall({
-      number: targetNumber,
-      direction: "outbound",
-      status: "dialing",
-      startTime: null,
-      isMuted: false,
-      isHeld: false,
-    });
-  }, []);
+  // Warm / attended transfer — START.
+  //
+  // Server-side: /api/telnyx/warm-transfer/initiate issues actions/hold
+  // on the ORIGINAL caller's external leg. Telnyx plays hold music to
+  // A and parks the leg.
+  //
+  // Client-side: once the hold lands, the rep's browser SDK-dials the
+  // transfer target. The second WebRTC call is what lets the rep talk
+  // to B privately. When rep presses Complete or Cancel, the matching
+  // server endpoint bridges-or-unholds; the client cleans up B's SDK
+  // call.
+  const warmTransferStart = useCallback(
+    async (targetNumber: string): Promise<boolean> => {
+      if (!clientRef.current || !callRef.current) return false;
+      const repCcid = callRef.current.telnyxIDs?.telnyxCallControlId;
+      if (!repCcid) {
+        transferDebug("warmTransferStart — no repCcid on active call");
+        return false;
+      }
+      transferDebug("warmTransferStart — POST /api/telnyx/warm-transfer/initiate", {
+        repCcid,
+        targetNumber,
+      });
+      try {
+        const res = await fetch("/api/telnyx/warm-transfer/initiate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repCcid, destinationNumber: targetNumber }),
+        });
+        const data = await res.json().catch(() => ({}));
+        transferDebug("warmTransferStart — response", { status: res.status, data });
+        if (!res.ok) {
+          console.error(
+            "[warm] start failed:",
+            res.status,
+            data?.error || "(no detail)"
+          );
+          setMicError(
+            `Warm transfer failed: ${data?.error || "could not hold caller"}.`
+          );
+          return false;
+        }
+      } catch (err) {
+        console.error("[warm] start threw:", err);
+        setMicError("Warm transfer failed: network error.");
+        return false;
+      }
+
+      // Reflect hold state in the UI immediately so the rep sees it
+      // while waiting for the SDK to go out to the target.
+      setActiveCall((prev) =>
+        prev ? { ...prev, isHeld: true, status: "held" } : null
+      );
+
+      const tCall = clientRef.current.newCall({
+        destinationNumber: targetNumber,
+        callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
+        audio: true,
+        video: false,
+        remoteElement: audioRef.current || undefined,
+      });
+      transferCallRef.current = tCall;
+      setTransferCall({
+        number: targetNumber,
+        direction: "outbound",
+        status: "dialing",
+        startTime: null,
+        isMuted: false,
+        isHeld: false,
+      });
+      return true;
+    },
+    []
+  );
+
+  // Legacy alias — kept so existing page.tsx wiring compiles. Prefer
+  // warmTransferStart in new code.
+  const initiateTransfer = useCallback(
+    (targetNumber: string) => {
+      warmTransferStart(targetNumber);
+    },
+    [warmTransferStart]
+  );
 
   // Blind transfer.
   //
@@ -641,72 +697,96 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     []
   );
 
-  const completeTransfer = useCallback(async () => {
+  // Warm transfer — COMPLETE.
+  //
+  // POSTs to /api/telnyx/warm-transfer/complete with both ccids. Server
+  // looks up their external_ccids and bridges the two carrier legs.
+  // Rep's two WebRTC legs drop naturally via callUpdate → hangup as
+  // Telnyx reassigns the bridges.
+  const warmTransferComplete = useCallback(async () => {
     if (!callRef.current || !transferCallRef.current) return;
-    const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
-    const transferCallId =
+    const repCcid = callRef.current.telnyxIDs.telnyxCallControlId;
+    const targetRepCcid =
       transferCallRef.current.telnyxIDs.telnyxCallControlId;
-    transferDebug("completeTransfer (warm/bridge) — POST /api/telnyx/transfer", {
-      call_control_id: originalCallId,
-      transfer_to_call_control_id: transferCallId,
+    transferDebug("warmTransferComplete — POST /api/telnyx/warm-transfer/complete", {
+      repCcid,
+      targetRepCcid,
     });
 
-    // Bridge the two legs server-side FIRST, then let Telnyx drop our
-    // WebRTC legs via normal callUpdate events. Hanging up locally before
-    // Telnyx bridges was the round-1 bug — Telnyx couldn't act on legs
-    // that had already sent BYE, so the external caller and target each
-    // dropped instead of getting connected.
     try {
-      const res = await fetch("/api/telnyx/transfer", {
+      const res = await fetch("/api/telnyx/warm-transfer/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          call_control_id: originalCallId,
-          transfer_to_call_control_id: transferCallId,
-        }),
+        body: JSON.stringify({ repCcid, targetRepCcid }),
       });
-      transferDebug("completeTransfer — response", { status: res.status });
+      const data = await res.json().catch(() => ({}));
+      transferDebug("warmTransferComplete — response", { status: res.status, data });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         console.error(
-          "[transfer] bridge failed:",
+          "[warm] complete failed:",
           res.status,
           data?.error || "(no detail)"
         );
-        // Surface to the rep as a mic-error banner — better than silent drop.
         setMicError(
           `Transfer failed: ${data?.error || "Telnyx rejected the bridge"}. The call is still active; try again or cancel.`
         );
         return;
       }
     } catch (err) {
-      console.error("[transfer] bridge threw:", err);
-      setMicError(
-        "Transfer failed: network error. The call is still active."
-      );
+      console.error("[warm] complete threw:", err);
+      setMicError("Transfer failed: network error. The call is still active.");
       return;
     }
 
-    // Telnyx is now bridging the two external legs. The rep's WebRTC legs
-    // receive BYEs from Telnyx as the bridge takes over; our `callUpdate`
-    // handler will null them out and fire onCallEnd. Clear the transfer-
-    // panel UI state now so the controls row collapses immediately.
+    // Telnyx is bridging the two external legs. Rep's WebRTC legs will
+    // receive BYEs and our hangup handler cleans up the state. Collapse
+    // the transfer-panel UI now.
     setTransferCall(null);
   }, []);
 
-  const cancelTransfer = useCallback(() => {
+  // Warm transfer — CANCEL.
+  //
+  // POSTs to /api/telnyx/warm-transfer/cancel to unhold the original
+  // caller's external leg. The client hangs up the target SDK leg;
+  // the rep is left talking to A again.
+  const warmTransferCancel = useCallback(async () => {
+    const repCcid = callRef.current?.telnyxIDs.telnyxCallControlId;
     if (transferCallRef.current) {
-      transferCallRef.current.hangup();
+      try {
+        transferCallRef.current.hangup();
+      } catch {}
       transferCallRef.current = null;
       setTransferCall(null);
     }
+    if (repCcid) {
+      try {
+        const res = await fetch("/api/telnyx/warm-transfer/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repCcid }),
+        });
+        const data = await res.json().catch(() => ({}));
+        transferDebug("warmTransferCancel — response", { status: res.status, data });
+      } catch (err) {
+        console.error("[warm] cancel threw:", err);
+      }
+    }
+    // Also mirror the un-hold in the SDK so the local UI/state matches
+    // whether or not the server unhold succeeded. Telnyx echoes the
+    // hold state back through call events anyway.
     if (callRef.current) {
-      callRef.current.unhold();
+      try {
+        callRef.current.unhold();
+      } catch {}
       setActiveCall((prev) =>
         prev ? { ...prev, isHeld: false, status: "active" } : null
       );
     }
   }, []);
+
+  // Legacy aliases for existing UI wiring.
+  const completeTransfer = warmTransferComplete;
+  const cancelTransfer = warmTransferCancel;
 
   const mergeConference = useCallback(() => {
     if (!callRef.current || !transferCallRef.current) return;
@@ -785,6 +865,9 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     initiateTransfer,
     completeTransfer,
     cancelTransfer,
+    warmTransferStart,
+    warmTransferComplete,
+    warmTransferCancel,
     mergeConference,
     voicemailDrop,
     changeAgentStatus,
