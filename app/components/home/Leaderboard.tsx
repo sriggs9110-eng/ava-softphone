@@ -72,18 +72,18 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
         </div>
       </div>
 
-      <div className="divide-y-2 divide-navy/10 relative">
+      <div className="relative">
         {loading && (
           <div className="absolute inset-0 bg-paper/70 flex items-center justify-center z-10">
             <Loader2 size={16} className="animate-spin text-slate" />
           </div>
         )}
         {block.rows.length === 0 ? (
-          <p className="px-4 py-6 text-[12px] text-slate text-center">
+          <p className="px-4 py-5 text-[12px] text-slate text-center">
             No calls in this window yet.
           </p>
         ) : (
-          block.rows.slice(0, 8).map((r) => {
+          block.rows.slice(0, 8).map((r, i, arr) => {
             const isMe = r.user_id === currentUserId;
             const tierBg =
               r.rank === 1
@@ -93,14 +93,15 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
                 : r.rank === 3
                 ? "bg-cream-3"
                 : "bg-paper";
+            const notLast = i < arr.length - 1;
             return (
               <div
                 key={r.user_id}
-                className={`flex items-center gap-3 px-4 py-2.5 ${tierBg} ${
-                  isMe ? "border-l-[4px] border-coral" : ""
-                }`}
+                className={`flex items-center gap-2.5 px-3 py-2 ${tierBg} ${
+                  isMe ? "border-l-[3px] border-coral pl-[9px]" : ""
+                } ${notLast ? "border-b border-dashed border-navy/30" : ""}`}
               >
-                <span className="w-6 text-[12px] font-semibold text-coral font-display italic tabular-nums shrink-0">
+                <span className="w-5 text-[12px] font-semibold text-coral font-display italic tabular-nums shrink-0">
                   {String(r.rank).padStart(2, "0")}
                 </span>
                 <span
@@ -109,7 +110,7 @@ export default function Leaderboard({ initial, currentUserId, refreshKey }: Prop
                 >
                   {r.initials}
                 </span>
-                <span className="flex-1 text-[13px] font-semibold text-navy truncate">
+                <span className="flex-1 text-[13px] font-semibold text-navy truncate leading-none">
                   {r.name}
                   {isMe && (
                     <span className="ml-1 text-[10px] text-coral font-bold uppercase tracking-wider">

@@ -110,7 +110,11 @@ export default function Sidebar({
   return (
     <nav className="w-[80px] bg-navy border-r-[2.5px] border-navy flex flex-col items-center py-5 gap-2 shrink-0 relative z-10">
       {/* Logo — banana square with tiny pepper */}
-      <div className="w-12 h-12 rounded-[14px] bg-banana border-[2.5px] border-navy shadow-pop-sm flex items-center justify-center mb-4">
+      <div
+        title="Pepper"
+        aria-label="Pepper"
+        className="w-12 h-12 rounded-[14px] bg-banana border-[2.5px] border-navy shadow-pop-sm flex items-center justify-center mb-4"
+      >
         <PepperMascot size="xs" state="listening" />
       </div>
 
@@ -121,9 +125,12 @@ export default function Sidebar({
           <button
             key={page}
             onClick={() => onNavigate(page)}
+            title={label}
+            aria-label={label}
+            aria-current={active ? "page" : undefined}
             className={`group relative w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-150 ${
               active
-                ? "bg-banana text-navy"
+                ? "bg-cream-2 text-navy"
                 : "text-white/50 hover:text-white hover:bg-navy-2"
             }`}
           >
@@ -161,9 +168,12 @@ export default function Sidebar({
       {/* Settings — visible to all roles; personal prefs live here */}
       <button
         onClick={() => onNavigate("settings")}
+        title="Settings"
+        aria-label="Settings"
+        aria-current={activePage === "settings" ? "page" : undefined}
         className={`group relative w-12 h-12 rounded-[14px] flex items-center justify-center transition-all duration-150 ${
           activePage === "settings"
-            ? "bg-banana text-navy"
+            ? "bg-cream-2 text-navy"
             : "text-white/50 hover:text-white hover:bg-navy-2"
         }`}
       >

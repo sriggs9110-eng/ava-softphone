@@ -9,6 +9,7 @@ import {
   Voicemail,
 } from "lucide-react";
 import type { ActivityItem } from "@/lib/home/dashboard";
+import { formatUSPhone } from "@/lib/format-phone";
 
 interface Props {
   items: ActivityItem[];
@@ -61,7 +62,11 @@ function ActivityRow({
   onToggle: () => void;
   fresh?: boolean;
 }) {
-  const label = item.contact_name || item.phone_number;
+  // Prefer contact name if the backend provides one; otherwise the
+  // formatted phone. `call_logs` has no contact join today, so this
+  // effectively always falls through to the formatter — wired up for when
+  // we add a contacts source.
+  const label = item.contact_name || formatUSPhone(item.phone_number);
   const sub = formatRelative(item.created_at);
   const scoreBadge = scoreBadgeFor(item.ai_score);
 

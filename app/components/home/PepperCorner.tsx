@@ -74,10 +74,10 @@ export default function PepperCorner({ mode, focusTip, lastCallScore }: Props) {
       : "Ready when you are";
 
   return (
-    <div className="bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-md p-5 flex flex-col items-center">
-      <PepperMascot size="md" state={state} />
+    <div className="bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-md px-4 py-4 flex flex-col items-center">
+      <PepperMascot size="lg" state={state} />
       <h3
-        className="mt-3 text-lg font-semibold text-navy font-display text-center"
+        className="mt-1 text-lg font-semibold text-navy font-display text-center leading-tight"
         dangerouslySetInnerHTML={{ __html: headline }}
       />
 
@@ -105,8 +105,8 @@ export default function PepperCorner({ mode, focusTip, lastCallScore }: Props) {
       )}
 
       {mode === "idle" && pick && (
-        <div className="mt-4 w-full bg-cream-3 border-2 border-navy rounded-[14px] p-3">
-          <div className="flex items-center gap-1.5 mb-2">
+        <div className="mt-3 w-full bg-cream-3 border-2 border-navy rounded-[14px] px-3 py-2.5">
+          <div className="flex items-center gap-1.5 mb-1.5">
             <Sparkles size={12} className="text-banana-deep" />
             <span className="text-[10px] font-bold uppercase tracking-wider text-navy">
               Pepper&rsquo;s Pick this week
@@ -115,12 +115,12 @@ export default function PepperCorner({ mode, focusTip, lastCallScore }: Props) {
           <p className="text-[13px] font-semibold text-navy font-display leading-snug">
             {pick.pepper_headline}
           </p>
-          <p className="text-[11px] text-slate mt-1 truncate">
+          <p className="text-[11px] text-slate mt-0.5 truncate">
             {pick.rep_name} → {pick.prospect_number}
           </p>
           <a
             href={`/?log=${pick.call_log_id}`}
-            className="inline-flex items-center gap-1 mt-2 px-3 py-1.5 rounded-full bg-banana border-2 border-navy text-navy text-[11px] font-bold shadow-pop-sm shadow-pop-hover"
+            className="inline-flex items-center gap-1 mt-2 px-3 py-1 rounded-full bg-banana border-2 border-navy text-navy text-[11px] font-bold shadow-pop-sm shadow-pop-hover"
           >
             <Play size={11} />
             Listen

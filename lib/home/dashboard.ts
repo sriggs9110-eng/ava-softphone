@@ -249,10 +249,34 @@ export async function fetchDashboard(
 
   const userRow = userRes.data as {
     id: string;
-    full_name: string;
+    full_name: string | null;
     role: string;
   } | null;
-  const fullName = userRow?.full_name || "User";
+  // full_name can legitimately be null (older seeded accounts), or it can
+  // literally be "Admin"/"Manager" from a placeholder seed. Treat role-word
+  // fallbacks as missing so we don't greet someone as their role.
+  const rawName = userRow?.full_name?.trim() || "";
+  const PLACEHOLDER_NAMES = new Set(["admin", "manager", "agent", "user"]);
+  let fullName =
+    rawName && !PLACEHOLDER_NAMES.has(rawName.toLowerCase()) ? rawName : "";
+  if (!fullName) {
+    // Pull the auth user's email and use its local-part as a best-effort
+    // first name. "stephen.riggs@foo" → "Stephen", "sriggs9110" → "Sriggs9110"
+    // (capitalize-first).
+    try {
+      const { data: authUser } = await admin.auth.admin.getUserById(opts.userId);
+      const email = authUser?.user?.email || "";
+      const local = email.split("@")[0] || "";
+      if (local) {
+        const first = local.split(/[._-]/)[0];
+        fullName = first.charAt(0).toUpperCase() + first.slice(1);
+      }
+    } catch {
+      // auth admin may not be reachable from every env; swallow and fall
+      // through to "there".
+    }
+  }
+  if (!fullName) fullName = "there";
 
   // Today stats
   const today = (todayCallsRes.data || []) as Array<{

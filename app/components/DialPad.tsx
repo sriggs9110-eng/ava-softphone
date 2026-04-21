@@ -76,7 +76,7 @@ export default function DialPad({
   }, []);
 
   return (
-    <div className="flex flex-col items-center gap-5 w-full max-w-[380px] mx-auto animate-fade-in">
+    <div className="flex flex-col items-center gap-3 w-full max-w-[340px] mx-auto animate-fade-in">
       {/* Number Input */}
       <div className="relative w-full">
         <input
@@ -86,7 +86,7 @@ export default function DialPad({
           onChange={(e) => setNumber(e.target.value)}
           onFocus={() => setShowRecents(true)}
           onBlur={() => setTimeout(() => setShowRecents(false), 200)}
-          className="w-full text-center text-[30px] font-semibold tracking-[1px] bg-paper border-[2.5px] border-navy rounded-[14px] px-4 py-4 text-navy focus:outline-none focus:bg-banana/20 transition-colors shadow-pop-sm font-display"
+          className="w-full text-center text-[22px] font-semibold tracking-[1px] bg-paper border-[2.5px] border-navy rounded-[12px] px-4 py-2.5 text-navy focus:outline-none focus:bg-banana/20 transition-colors shadow-pop-sm font-display"
           placeholder="+1"
         />
         {number.length > 2 && (
@@ -129,18 +129,18 @@ export default function DialPad({
       </div>
 
       {/* Number Pad */}
-      <div className="grid grid-cols-3 gap-4 w-full px-4">
+      <div className="grid grid-cols-3 gap-2 w-full px-2">
         {KEYS.flat().map((key) => (
           <button
             key={key}
             onClick={() => handleKey(key)}
-            className="flex flex-col items-center justify-center w-16 h-16 mx-auto rounded-full bg-paper border-[2.5px] border-navy active:scale-95 transition-all duration-150 select-none shadow-pop-sm shadow-pop-hover"
+            className="flex flex-col items-center justify-center w-14 h-14 mx-auto rounded-full bg-paper border-[2.5px] border-navy active:scale-95 transition-all duration-150 select-none shadow-pop-sm shadow-pop-hover"
           >
-            <span className="text-[30px] font-semibold text-navy leading-none font-display">
+            <span className="text-[22px] font-semibold text-navy leading-none font-display">
               {key}
             </span>
             {SUB_LABELS[key] && (
-              <span className="text-[9px] tracking-[2px] text-slate uppercase mt-0.5 font-bold">
+              <span className="text-[8px] tracking-[2px] text-slate uppercase mt-0.5 font-bold">
                 {SUB_LABELS[key]}
               </span>
             )}
@@ -152,10 +152,10 @@ export default function DialPad({
       <button
         onClick={handleCall}
         disabled={number.length <= 2 || disabled}
-        className="w-[72px] h-[72px] rounded-full bg-leaf border-[2.5px] border-navy disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all duration-150 active:scale-95 mt-2 shadow-pop-md shadow-pop-hover"
+        className="w-14 h-14 rounded-full bg-leaf border-[2.5px] border-navy disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center transition-all duration-150 active:scale-95 mt-1 shadow-pop-md shadow-pop-hover"
         aria-label="Call"
       >
-        <svg width="30" height="30" viewBox="0 0 24 24" fill="white">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="white">
           <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 00-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
         </svg>
       </button>

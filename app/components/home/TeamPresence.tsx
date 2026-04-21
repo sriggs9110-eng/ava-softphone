@@ -23,18 +23,43 @@ export default function TeamPresence({ members, onMemberClick }: Props) {
   const visible = members.slice(0, 8);
   const overflow = members.length - visible.length;
 
+  const counts = members.reduce<Record<string, number>>((acc, m) => {
+    const bucket =
+      m.status === "available"
+        ? "available"
+        : m.status === "on_call"
+        ? "on_call"
+        : m.status === "dnd"
+        ? "dnd"
+        : "offline";
+    acc[bucket] = (acc[bucket] || 0) + 1;
+    return acc;
+  }, {});
+  const summary = [
+    counts.available ? `${counts.available} available` : null,
+    counts.on_call ? `${counts.on_call} on call` : null,
+    counts.dnd ? `${counts.dnd} DND` : null,
+    counts.offline ? `${counts.offline} offline` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <div className="bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-md p-4">
-      <h3 className="text-base font-semibold text-navy font-display mb-1">
-        Team on shift
-      </h3>
-      <p className="text-[11px] text-slate uppercase tracking-wider font-bold mb-3">
-        {members.filter((m) => m.status !== "offline").length} online
-      </p>
+    <div className="bg-paper border-[2.5px] border-navy rounded-[18px] shadow-pop-md px-4 py-3">
+      <div className="flex items-baseline justify-between gap-2 mb-2">
+        <h3 className="text-base font-semibold text-navy font-display">
+          Team on shift
+        </h3>
+        {summary && (
+          <span className="text-[10px] text-slate uppercase tracking-wider font-bold truncate">
+            {summary}
+          </span>
+        )}
+      </div>
       {members.length === 0 ? (
         <p className="text-[12px] text-slate">Nobody clocked in yet.</p>
       ) : (
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {visible.map((m) => {
             const dot = STATUS_DOT[m.status] || STATUS_DOT.offline;
             const clickable = m.status === "on_call" && !!onMemberClick;
@@ -44,20 +69,20 @@ export default function TeamPresence({ members, onMemberClick }: Props) {
                 onClick={() => clickable && onMemberClick?.(m.user_id)}
                 disabled={!clickable}
                 title={`${m.name} · ${dot.label}`}
-                className={`relative w-10 h-10 rounded-full border-2 border-navy flex items-center justify-center text-[12px] font-bold text-navy ${
+                className={`relative w-8 h-8 rounded-full border-2 border-navy flex items-center justify-center text-[11px] font-bold text-navy ${
                   clickable ? "cursor-pointer hover:-translate-y-0.5 transition-transform" : "cursor-default"
                 }`}
                 style={{ background: m.avatar_color }}
               >
                 {m.initials}
                 <span
-                  className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-navy ${dot.bg}`}
+                  className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-navy ${dot.bg}`}
                 />
               </button>
             );
           })}
           {overflow > 0 && (
-            <div className="w-10 h-10 rounded-full bg-cream-2 border-2 border-navy flex items-center justify-center text-[11px] font-bold text-navy">
+            <div className="w-8 h-8 rounded-full bg-cream-2 border-2 border-navy flex items-center justify-center text-[10px] font-bold text-navy">
               +{overflow}
             </div>
           )}

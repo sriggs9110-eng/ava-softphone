@@ -1,6 +1,7 @@
 "use client";
 
-import { ArrowDown, ArrowUp, Minus, Phone } from "lucide-react";
+import { ArrowDown, ArrowUp, Minus } from "lucide-react";
+import PepperMascot from "@/components/pepper/PepperMascot";
 
 interface Props {
   firstName: string;
@@ -12,7 +13,9 @@ interface Props {
     answer_rate_prev: number;
     avg_score_prev: number;
   };
-  onMakeCall: () => void;
+  // Retained for compatibility; no longer used since the button was removed
+  // in the polish pass — dial pad itself is the make-a-call action.
+  onMakeCall?: () => void;
 }
 
 function greetingFor(hour: number): string {
@@ -27,16 +30,17 @@ function delta(current: number, prev: number): "up" | "flat" | "down" {
   return "flat";
 }
 
-export default function TopBar({ firstName, stats, onMakeCall }: Props) {
+export default function TopBar({ firstName, stats }: Props) {
   const greeting = greetingFor(new Date().getHours());
   const zero = stats.calls_total === 0;
 
   return (
     <div className="w-full bg-cream-2 border-b-2 border-navy">
-      <div className="flex flex-wrap items-center gap-4 px-6 py-4 min-h-[72px]">
-        <div className="flex-1 min-w-[220px]">
-          <h1 className="text-[1.5rem] leading-tight font-semibold text-navy font-display tracking-tight">
-            {greeting}, {firstName} 🌶️
+      <div className="flex items-center gap-3 px-6 py-4 min-h-[72px]">
+        <PepperMascot size="xs" state="listening" />
+        <div className="flex-1 min-w-0">
+          <h1 className="text-[1.5rem] leading-tight font-semibold text-navy font-display tracking-tight truncate">
+            {greeting}, {firstName}
           </h1>
           {zero ? (
             <p className="text-[12px] text-slate font-medium mt-0.5">
@@ -49,16 +53,6 @@ export default function TopBar({ firstName, stats, onMakeCall }: Props) {
               {stats.avg_score > 0 ? `${stats.avg_score.toFixed(1)}/10` : "—"} avg
             </p>
           )}
-        </div>
-
-        <div className="flex items-center gap-2 ml-auto">
-          <button
-            onClick={onMakeCall}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-banana border-[2.5px] border-navy text-navy text-sm font-bold shadow-pop-md shadow-pop-hover"
-          >
-            <Phone size={14} />
-            Make a call
-          </button>
         </div>
       </div>
     </div>
