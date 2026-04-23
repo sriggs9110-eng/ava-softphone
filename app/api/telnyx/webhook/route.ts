@@ -93,10 +93,41 @@ async function fanOutToAgents({
         );
         return;
       }
-      const newCcid = data?.data?.call_control_id || "(unknown)";
+      const newCcid = data?.data?.call_control_id as string | undefined;
+      const newSessionId = data?.data?.call_session_id as string | undefined;
       console.log(
-        `[routing] ${context} dialed agent user=${m.user_id} sip=${sipUri} newCcid=${newCcid}`
+        `[routing] ${context} dialed agent user=${m.user_id} sip=${sipUri} newCcid=${newCcid ?? "(unknown)"}`
       );
+
+      // Pairing-time stamp: at this moment we KNOW the relationship — the
+      // new outbound leg's ccid pairs with callControlId (the inbound PSTN
+      // leg). Record it immediately so transfers don't depend on the
+      // call.bridged webhook firing & the session-correlation heuristic.
+      // See commit history: external_ccid was NULL on every call because
+      // the post-hoc stamp is fragile. This is the deterministic source.
+      if (newCcid) {
+        try {
+          const admin = getAdmin();
+          await admin.from("call_logs").insert({
+            direction: "inbound",
+            phone_number: from,
+            from_number: to,
+            status: "ringing",
+            call_control_id: newCcid,
+            external_ccid: callControlId,
+            call_session_id: newSessionId || null,
+            user_id: m.user_id,
+          });
+          console.log(
+            `[pairing] inserted row ccid=${newCcid} external_ccid=${callControlId} user=${m.user_id} session=${newSessionId ?? "?"}`
+          );
+        } catch (err) {
+          console.error(
+            `[pairing] insert failed ccid=${newCcid}:`,
+            (err as Error).message
+          );
+        }
+      }
     } catch (err) {
       console.error(
         `[routing] ${context} fan-out to ${sipUri} threw:`,
@@ -648,6 +679,47 @@ async function updateRow(id: string, updates: Record<string, unknown>) {
   }
 }
 
+// Deterministically stamp external_ccid across session peers. For any row
+// sharing `sessionId` whose `call_control_id` differs from `ccid` and whose
+// `external_ccid` is NULL, set external_ccid = ccid.
+//
+// This is the replacement for the older [bridge] stamping heuristic, which
+// was fragile (relied on call.bridged firing, on row count, on ordering).
+// Pairing-time inserts in fanOutToAgents cover inbound fan-out; this covers
+// outbound SDK calls and any other path whose legs only become visible
+// post-hoc via webhook events.
+async function crossStampSessionPeers(
+  sessionId: string,
+  ccid: string,
+  eventTag: string
+) {
+  const admin = getAdmin();
+  const { data: peers } = await admin
+    .from("call_logs")
+    .select("id, call_control_id, external_ccid")
+    .eq("call_session_id", sessionId);
+  const rows = (peers || []) as Array<{
+    id: string;
+    call_control_id: string | null;
+    external_ccid: string | null;
+  }>;
+  for (const r of rows) {
+    if (
+      r.call_control_id &&
+      r.call_control_id !== ccid &&
+      !r.external_ccid
+    ) {
+      await admin
+        .from("call_logs")
+        .update({ external_ccid: ccid })
+        .eq("id", r.id);
+      console.log(
+        `[session-stamp/${eventTag}] external_ccid=${ccid} on row=${r.id} primary=${r.call_control_id} session=${sessionId}`
+      );
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
   const eventType = body?.data?.event_type;
@@ -702,49 +774,102 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      let row = await findRecentCall(payload);
+      // If a row already exists for THIS exact ccid (e.g., fanOutToAgents
+      // pre-inserted a pairing-time row, or a prior event already claimed
+      // this ccid), just top up the session/from_number — never overwrite.
+      const admin0 = getAdmin();
+      const { data: alreadyStamped } = await admin0
+        .from("call_logs")
+        .select("id")
+        .eq("call_control_id", ccid || "")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      if (row) {
-        // Capture Telnyx's view of From/To too — previously these only wrote on
-        // the insert branch, leaving from_number=null on existing rows.
-        // This is what Telnyx actually put on the wire, so it's the ground
-        // truth for diagnosing local-presence CID overrides.
+      if (alreadyStamped) {
         const telnyxDir = payload?.direction as string | undefined;
         const telnyxIsOutgoing =
           telnyxDir === "outgoing" || telnyxDir === "outbound";
         const telnyxFrom = telnyxIsOutgoing ? from : to;
-        console.log(
-          `[Webhook] initiated — row ${row.id} telnyx-from=${telnyxFrom} direction=${telnyxDir}`
-        );
-        await updateRow(row.id, {
-          call_control_id: ccid,
+        await updateRow(alreadyStamped.id, {
           call_session_id: sessionId,
           from_number: telnyxFrom || null,
         });
+        console.log(
+          `[Webhook] initiated — row ${alreadyStamped.id} already stamped for ccid=${ccid}, topped up session/from`
+        );
       } else {
-        const dir = payload?.direction as string;
-        const prospectNumber = dir === "outbound" ? to : from;
-        const fromNumber = dir === "outbound" ? from : to;
+        let row = await findRecentCall(payload);
 
-        const admin = getAdmin();
-        const { data, error } = await admin
-          .from("call_logs")
-          .insert({
-            direction: dir === "outbound" ? "outbound" : "inbound",
-            phone_number: prospectNumber || to || from,
-            from_number: fromNumber,
-            status: "initiated",
+        // Guard against overwriting the ccid on a row that's already been
+        // claimed by a DIFFERENT leg. This happens for outbound SDK calls
+        // where PSTN and credential legs both match by phone_number within
+        // the 1-minute window — without this guard, the later event
+        // overwrites the earlier leg's ccid, breaking transfer lookups.
+        if (row) {
+          const { data: rowFull } = await admin0
+            .from("call_logs")
+            .select("call_control_id")
+            .eq("id", row.id)
+            .maybeSingle();
+          const claimedCcid = rowFull?.call_control_id as string | null | undefined;
+          if (claimedCcid && ccid && claimedCcid !== ccid) {
+            console.log(
+              `[Webhook] initiated — row ${row.id} already claims ccid=${claimedCcid}, not overwriting with ${ccid}; will insert a peer row`
+            );
+            row = null;
+          }
+        }
+
+        if (row) {
+          const telnyxDir = payload?.direction as string | undefined;
+          const telnyxIsOutgoing =
+            telnyxDir === "outgoing" || telnyxDir === "outbound";
+          const telnyxFrom = telnyxIsOutgoing ? from : to;
+          console.log(
+            `[Webhook] initiated — row ${row.id} telnyx-from=${telnyxFrom} direction=${telnyxDir}`
+          );
+          await updateRow(row.id, {
             call_control_id: ccid,
             call_session_id: sessionId,
-          })
-          .select("id")
-          .single();
-
-        if (error) {
-          console.log(`[Webhook] initiated — insert failed:`, error.message);
+            from_number: telnyxFrom || null,
+          });
         } else {
-          console.log(`[Webhook] initiated — created row ${data.id}`);
+          const dir = payload?.direction as string;
+          const prospectNumber = dir === "outbound" ? to : from;
+          const fromNumber = dir === "outbound" ? from : to;
+
+          const { data, error } = await admin0
+            .from("call_logs")
+            .insert({
+              direction: dir === "outbound" ? "outbound" : "inbound",
+              phone_number: prospectNumber || to || from,
+              from_number: fromNumber,
+              status: "initiated",
+              call_control_id: ccid,
+              call_session_id: sessionId,
+            })
+            .select("id")
+            .single();
+
+          if (error) {
+            console.log(`[Webhook] initiated — insert failed:`, error.message);
+          } else {
+            console.log(`[Webhook] initiated — created row ${data.id}`);
+          }
         }
+      }
+
+      // Cross-stamp external_ccid across session peers. Deterministic
+      // pairing: if two legs share a call_session_id but have distinct
+      // call_control_ids, each leg's external_ccid is the other's ccid.
+      // Fires on every call.initiated so the second leg's arrival
+      // immediately stamps the first leg (and vice versa). Pairing-time
+      // inserts in fanOutToAgents already set external_ccid on inbound
+      // fan-out rows; this covers outbound SDK calls and any other path
+      // that lands in the call.initiated handler.
+      if (sessionId && ccid) {
+        await crossStampSessionPeers(sessionId, ccid, "initiated");
       }
       break;
     }
@@ -802,16 +927,61 @@ export async function POST(req: NextRequest) {
         console.warn("[Webhook] call.answered without ccid — cannot start recording");
       }
 
-      const row = await findRecentCall(payload);
-      if (row) {
-        await updateRow(row.id, {
+      // Prefer matching by ccid (stable, unique) before falling back to
+      // phone-number heuristic — this avoids clobbering an already-claimed
+      // peer row's call_control_id on call.answered/bridged.
+      const adminAns = getAdmin();
+      const { data: ccidRow } = await adminAns
+        .from("call_logs")
+        .select("id")
+        .eq("call_control_id", ccid || "")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (ccidRow) {
+        await updateRow(ccidRow.id, {
           status: "connected",
-          call_control_id: ccid,
           call_session_id: sessionId,
         });
-        console.log(`[Webhook] ${eventType} → connected, row ${row.id}`);
+        console.log(`[Webhook] ${eventType} → connected, row ${ccidRow.id} (by ccid)`);
       } else {
-        console.warn(`[Webhook] ${eventType} — no row found`);
+        const row = await findRecentCall(payload);
+        if (row) {
+          const { data: rowFull } = await adminAns
+            .from("call_logs")
+            .select("call_control_id")
+            .eq("id", row.id)
+            .maybeSingle();
+          const claimedCcid = rowFull?.call_control_id as string | null | undefined;
+          if (claimedCcid && ccid && claimedCcid !== ccid) {
+            // Peer row — don't overwrite ccid. Just bump status.
+            await updateRow(row.id, {
+              status: "connected",
+              call_session_id: sessionId,
+            });
+            console.log(
+              `[Webhook] ${eventType} → connected, row ${row.id} (peer, kept ccid=${claimedCcid})`
+            );
+          } else {
+            await updateRow(row.id, {
+              status: "connected",
+              call_control_id: ccid,
+              call_session_id: sessionId,
+            });
+            console.log(`[Webhook] ${eventType} → connected, row ${row.id}`);
+          }
+        } else {
+          console.warn(`[Webhook] ${eventType} — no row found`);
+        }
+      }
+
+      // Deterministic peer-stamp: cross-stamp external_ccid on every
+      // session peer. Fires on both call.answered and call.bridged so
+      // outbound SDK calls (where only call.answered may fire, not
+      // call.bridged) still get stamped.
+      if (ccid && sessionId) {
+        await crossStampSessionPeers(sessionId, ccid, eventType);
       }
 
       // Capture the OTHER leg's ccid for blind transfer via SIP REFER.
