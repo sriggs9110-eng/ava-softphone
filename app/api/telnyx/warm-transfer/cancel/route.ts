@@ -1,83 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
 
-// Warm transfer — step 2b (Cancel).
+// Warm transfer — step 2b (historical).
 //
-// Releases the hold on the original caller's external leg so the rep
-// can resume talking to them. The client hangs up the transfer-target
-// leg via the SDK — we don't need the server to do that.
-//
-// Body: { repCcid }
-// Returns: { success, externalCcid }
-//
-// Logged with [warm/cancel] prefix.
-export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
-  const { repCcid } = body as { repCcid?: string };
-
-  const apiKey = process.env.TELNYX_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "TELNYX_API_KEY not configured" },
-      { status: 500 }
-    );
-  }
-  if (!repCcid) {
-    return NextResponse.json({ error: "repCcid required" }, { status: 400 });
-  }
-
-  const admin = createAdminClient();
-  const { data: row } = await admin
-    .from("call_logs")
-    .select("external_ccid")
-    .eq("call_control_id", repCcid)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  // Same fallback as warm/initiate: if external_ccid isn't stamped,
-  // unhold repCcid directly. For outbound SDK→PSTN calls that's the
-  // correct leg (the SDK's ccid IS the PSTN leg). Mirrors the initiate
-  // endpoint so hold/unhold use the same target.
-  const externalCcid = (row?.external_ccid as string | null) || null;
-  const targetCcid = externalCcid || repCcid;
-  if (!externalCcid) {
-    console.log(
-      `[warm/cancel/fallback] no external_ccid for repCcid=${repCcid} — unholding repCcid directly`
-    );
-  }
-
-  console.log(
-    `[warm/cancel] request repCcid=${repCcid} targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(none)"} — unhold`
-  );
-
-  const res = await fetch(
-    `https://api.telnyx.com/v2/calls/${targetCcid}/actions/unhold`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({}),
-    }
-  );
-  const data = await res.json().catch(() => ({}));
-  console.log(
-    `[warm/cancel] response status=${res.status} responseBody=${JSON.stringify(data)}`
-  );
-
-  if (!res.ok) {
-    const detail =
-      data?.errors?.[0]?.detail ||
-      data?.errors?.[0]?.title ||
-      "Unhold failed";
-    return NextResponse.json({ error: detail }, { status: res.status });
-  }
-
+// DEPRECATED. Unhold is handled client-side via the Telnyx WebRTC SDK's
+// call.unhold() method (see app/hooks/useTelnyxClient.ts →
+// warmTransferCancel). Telnyx's v2 Call Control HTTP API has NO
+// /actions/unhold endpoint — same reason as /actions/hold (see
+// initiate/route.ts). Old clients may still POST here.
+export async function POST(_req: NextRequest) {
+  console.log("[warm/cancel] deprecated — unhold is now SDK-side, no-op");
   return NextResponse.json({
     success: true,
-    externalCcid: targetCcid,
-    usedExternalLeg: Boolean(externalCcid),
+    deprecated: true,
+    note: "unhold is handled client-side via SDK call.unhold()",
   });
 }

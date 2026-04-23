@@ -559,45 +559,34 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   // to B privately. When rep presses Complete or Cancel, the matching
   // server endpoint bridges-or-unholds; the client cleans up B's SDK
   // call.
+  // Warm transfer — START.
+  //
+  // Hold the customer via the SDK (Verto call.hold over WebSocket), then
+  // dial the transfer target as a second SDK call. HOLD IS CLIENT-SIDE:
+  // Telnyx's v2 Call Control HTTP API has NO /actions/hold endpoint
+  // (probed — every /hold* variant returns 404, while /speak /bridge
+  // /transfer etc. exist and return 422 on a dead call). The earlier
+  // server-side /warm-transfer/initiate → /actions/hold path was built
+  // on a non-existent endpoint. This replaces it with the SDK's
+  // Verto-level hold, which is the actual supported mechanism.
   const warmTransferStart = useCallback(
     async (targetNumber: string): Promise<boolean> => {
       if (!clientRef.current || !callRef.current) return false;
-      const repCcid = callRef.current.telnyxIDs?.telnyxCallControlId;
-      if (!repCcid) {
-        transferDebug("warmTransferStart — no repCcid on active call");
-        return false;
-      }
-      transferDebug("warmTransferStart — POST /api/telnyx/warm-transfer/initiate", {
-        repCcid,
+      const active = callRef.current;
+      transferDebug("warmTransferStart — SDK hold", {
+        ccid: active.telnyxIDs?.telnyxCallControlId,
         targetNumber,
       });
+
       try {
-        const res = await fetch("/api/telnyx/warm-transfer/initiate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repCcid, destinationNumber: targetNumber }),
-        });
-        const data = await res.json().catch(() => ({}));
-        transferDebug("warmTransferStart — response", { status: res.status, data });
-        if (!res.ok) {
-          console.error(
-            "[warm] start failed:",
-            res.status,
-            data?.error || "(no detail)"
-          );
-          setMicError(
-            `Warm transfer failed: ${data?.error || "could not hold caller"}.`
-          );
-          return false;
-        }
+        await active.hold();
       } catch (err) {
-        console.error("[warm] start threw:", err);
-        setMicError("Warm transfer failed: network error.");
+        console.error("[warm] SDK hold() threw:", err);
+        setMicError("Warm transfer failed: could not hold the caller.");
         return false;
       }
 
-      // Reflect hold state in the UI immediately so the rep sees it
-      // while waiting for the SDK to go out to the target.
+      // Reflect hold state in the UI immediately.
       setActiveCall((prev) =>
         prev ? { ...prev, isHeld: true, status: "held" } : null
       );
@@ -713,6 +702,15 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       targetRepCcid,
     });
 
+    // Unhold the original leg before the server bridges. Bridging into
+    // a held leg can leave the customer with no audio after the
+    // handoff; unholding first restores the media path.
+    try {
+      await callRef.current.unhold();
+    } catch (err) {
+      console.warn("[warm] unhold before bridge threw (continuing):", err);
+    }
+
     try {
       const res = await fetch("/api/telnyx/warm-transfer/complete", {
         method: "POST",
@@ -758,26 +756,16 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       transferCallRef.current = null;
       setTransferCall(null);
     }
-    if (repCcid) {
-      try {
-        const res = await fetch("/api/telnyx/warm-transfer/cancel", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repCcid }),
-        });
-        const data = await res.json().catch(() => ({}));
-        transferDebug("warmTransferCancel — response", { status: res.status, data });
-      } catch (err) {
-        console.error("[warm] cancel threw:", err);
-      }
-    }
-    // Also mirror the un-hold in the SDK so the local UI/state matches
-    // whether or not the server unhold succeeded. Telnyx echoes the
-    // hold state back through call events anyway.
+    // SDK-side unhold — mirrors warmTransferStart's SDK-side hold.
+    // Server /warm-transfer/cancel is no longer needed (it targeted a
+    // non-existent /actions/unhold endpoint on Telnyx's v2 HTTP API).
+    void repCcid;
     if (callRef.current) {
       try {
-        callRef.current.unhold();
-      } catch {}
+        await callRef.current.unhold();
+      } catch (err) {
+        console.error("[warm] SDK unhold() threw:", err);
+      }
       setActiveCall((prev) =>
         prev ? { ...prev, isHeld: false, status: "active" } : null
       );
