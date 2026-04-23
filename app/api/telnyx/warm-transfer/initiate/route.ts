@@ -30,32 +30,34 @@ export async function POST(req: NextRequest) {
   const admin = createAdminClient();
   const { data: row } = await admin
     .from("call_logs")
-    .select("external_ccid")
+    .select("external_ccid, direction")
     .eq("call_control_id", repCcid)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
+  // Fallback: when no external_ccid is stamped we use repCcid directly.
+  // For outbound SDK→PSTN calls, the SDK's call_control_id IS the PSTN
+  // leg's ccid (there's no separate external leg visible in our
+  // webhook stream), so holding repCcid holds the callee — exactly what
+  // warm transfer needs. For inbound fan-out we rely on pairing-time
+  // stamping (see fanOutToAgents) to populate external_ccid; if that
+  // somehow didn't run, this fallback will fail at the Telnyx call and
+  // surface the underlying error to the UI rather than our 409 lie.
   const externalCcid = (row?.external_ccid as string | null) || null;
+  const targetCcid = externalCcid || repCcid;
   if (!externalCcid) {
     console.log(
-      `[warm/initiate] no external_ccid captured for repCcid=${repCcid} — cannot hold external leg`
-    );
-    return NextResponse.json(
-      {
-        error:
-          "External leg not captured yet — call.bridged webhook hasn't fired. Try again in a moment.",
-      },
-      { status: 409 }
+      `[warm/initiate/fallback] no external_ccid for repCcid=${repCcid} — using repCcid as hold target (expected for outbound SDK calls)`
     );
   }
 
   console.log(
-    `[warm/initiate] request repCcid=${repCcid} externalCcid=${externalCcid} — hold`
+    `[warm/initiate] request repCcid=${repCcid} targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(none)"} — hold`
   );
 
   const res = await fetch(
-    `https://api.telnyx.com/v2/calls/${externalCcid}/actions/hold`,
+    `https://api.telnyx.com/v2/calls/${targetCcid}/actions/hold`,
     {
       method: "POST",
       headers: {
@@ -76,5 +78,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
-  return NextResponse.json({ success: true, externalCcid });
+  return NextResponse.json({
+    success: true,
+    externalCcid: targetCcid,
+    usedExternalLeg: Boolean(externalCcid),
+  });
 }

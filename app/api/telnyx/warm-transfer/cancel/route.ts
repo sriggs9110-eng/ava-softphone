@@ -35,23 +35,24 @@ export async function POST(req: NextRequest) {
     .limit(1)
     .maybeSingle();
 
+  // Same fallback as warm/initiate: if external_ccid isn't stamped,
+  // unhold repCcid directly. For outbound SDK→PSTN calls that's the
+  // correct leg (the SDK's ccid IS the PSTN leg). Mirrors the initiate
+  // endpoint so hold/unhold use the same target.
   const externalCcid = (row?.external_ccid as string | null) || null;
+  const targetCcid = externalCcid || repCcid;
   if (!externalCcid) {
     console.log(
-      `[warm/cancel] no external_ccid for repCcid=${repCcid} — cannot unhold`
-    );
-    return NextResponse.json(
-      { error: "External leg not captured" },
-      { status: 409 }
+      `[warm/cancel/fallback] no external_ccid for repCcid=${repCcid} — unholding repCcid directly`
     );
   }
 
   console.log(
-    `[warm/cancel] request repCcid=${repCcid} externalCcid=${externalCcid} — unhold`
+    `[warm/cancel] request repCcid=${repCcid} targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(none)"} — unhold`
   );
 
   const res = await fetch(
-    `https://api.telnyx.com/v2/calls/${externalCcid}/actions/unhold`,
+    `https://api.telnyx.com/v2/calls/${targetCcid}/actions/unhold`,
     {
       method: "POST",
       headers: {
@@ -74,5 +75,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
-  return NextResponse.json({ success: true, externalCcid });
+  return NextResponse.json({
+    success: true,
+    externalCcid: targetCcid,
+    usedExternalLeg: Boolean(externalCcid),
+  });
 }

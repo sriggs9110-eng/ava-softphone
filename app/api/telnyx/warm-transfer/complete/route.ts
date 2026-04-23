@@ -55,32 +55,32 @@ export async function POST(req: NextRequest) {
   const externalCcid = byCcid.get(repCcid) || null;
   const targetExternalCcid = byCcid.get(targetRepCcid) || null;
 
+  // Fallback for outbound SDK→PSTN calls (same reasoning as warm/initiate):
+  // the SDK's call_control_id IS the PSTN leg's ccid, so bridging repCcid
+  // ↔ targetRepCcid IS the correct operation when no external_ccid is
+  // stamped. Inbound fan-out relies on pairing-time stamping — if that
+  // populated external_ccid we use it; otherwise fall back.
+  const bridgeFrom = externalCcid || repCcid;
+  const bridgeTo = targetExternalCcid || targetRepCcid;
   if (!externalCcid || !targetExternalCcid) {
     console.log(
-      `[warm/complete] missing external ccid(s) — repCcid=${repCcid} externalCcid=${externalCcid ?? "(missing)"} targetRepCcid=${targetRepCcid} targetExternalCcid=${targetExternalCcid ?? "(missing)"}`
-    );
-    return NextResponse.json(
-      {
-        error:
-          "External legs not captured on one or both calls. call.bridged hasn't fired yet — try again in a moment.",
-      },
-      { status: 409 }
+      `[warm/complete/fallback] missing external ccid — from=${bridgeFrom} (ext=${externalCcid ?? "none"}) to=${bridgeTo} (ext=${targetExternalCcid ?? "none"})`
     );
   }
 
   console.log(
-    `[warm/complete] request repCcid=${repCcid} externalCcid=${externalCcid} targetRepCcid=${targetRepCcid} targetExternalCcid=${targetExternalCcid}`
+    `[warm/complete] request from=${bridgeFrom} to=${bridgeTo} repCcid=${repCcid} targetRepCcid=${targetRepCcid}`
   );
 
   const res = await fetch(
-    `https://api.telnyx.com/v2/calls/${externalCcid}/actions/bridge`,
+    `https://api.telnyx.com/v2/calls/${bridgeFrom}/actions/bridge`,
     {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ call_control_id: targetExternalCcid }),
+      body: JSON.stringify({ call_control_id: bridgeTo }),
     }
   );
   const data = await res.json().catch(() => ({}));
@@ -96,7 +96,8 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     success: true,
-    externalCcid,
-    targetExternalCcid,
+    externalCcid: bridgeFrom,
+    targetExternalCcid: bridgeTo,
+    usedExternalLeg: Boolean(externalCcid && targetExternalCcid),
   });
 }
