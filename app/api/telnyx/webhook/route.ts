@@ -119,11 +119,11 @@ async function fanOutToAgents({
             user_id: m.user_id,
           });
           console.log(
-            `[pairing] inserted row ccid=${newCcid} external_ccid=${callControlId} user=${m.user_id} session=${newSessionId ?? "?"}`
+            `[bridge/pair] inbound stamped external_ccid=${callControlId} on newCcid=${newCcid} agent=${m.user_id} session=${newSessionId ?? "?"}`
           );
         } catch (err) {
           console.error(
-            `[pairing] insert failed ccid=${newCcid}:`,
+            `[bridge/pair] inbound insert failed ccid=${newCcid}:`,
             (err as Error).message
           );
         }
@@ -631,7 +631,14 @@ async function findByCallControlId(ccid: string) {
   return null;
 }
 
-// Match by phone_number + time window
+// Match by phone_number + time window.
+//
+// Skips rows whose external_ccid is already populated — those are locked
+// pairing rows (set by fanOutToAgents at inbound-dial time or by the
+// outbound phone+time stamp in call.answered). Overwriting their
+// call_control_id on a stray phone match would break transfer lookups,
+// and their status/duration are already driven by their own ccid events
+// via the ccid-first paths in call.answered / call.hangup.
 async function findRecentCall(
   payload: Record<string, unknown>,
   windowMinutes = 1
@@ -654,6 +661,7 @@ async function findRecentCall(
       .from("call_logs")
       .select("id")
       .eq("phone_number", phone)
+      .is("external_ccid", null)
       .gte("created_at", cutoff)
       .order("created_at", { ascending: false })
       .limit(1);
@@ -982,6 +990,65 @@ export async function POST(req: NextRequest) {
       // call.bridged) still get stamped.
       if (ccid && sessionId) {
         await crossStampSessionPeers(sessionId, ccid, eventType);
+      }
+
+      // Outbound SDK → PSTN correlation by phone+time (no session join).
+      //
+      // For outbound WebRTC→PSTN calls, the SDK-preinserted row (phone
+      // + call_control_id=SDK_ccid from app/page.tsx) and the PSTN leg
+      // (this webhook event) don't reliably share call_session_id, so
+      // crossStampSessionPeers is a no-op. When THIS event is an
+      // outgoing PSTN leg (direction=outgoing, to is phone-shaped), we
+      // KNOW this ccid is the external leg for the rep's SDK row. Find
+      // the most recent outbound row whose phone_number matches `to`
+      // and that isn't already paired, and stamp external_ccid=ccid.
+      //
+      // Scoped tightly: last 5 min, direction=outbound, not already
+      // stamped, and whose existing call_control_id (if any) differs
+      // from this PSTN ccid (so we don't stamp the PSTN leg's own row).
+      const direction = (payload?.direction as string | undefined) || "";
+      const isOutgoingLeg =
+        direction === "outgoing" || direction === "outbound";
+      const toIsPhone = /^\+?\d{7,15}$/.test(to);
+      if (isOutgoingLeg && toIsPhone && ccid && to) {
+        const adminOut = getAdmin();
+        const fiveMinAgo = new Date(Date.now() - 300_000).toISOString();
+        const { data: candidates } = await adminOut
+          .from("call_logs")
+          .select("id, call_control_id, phone_number")
+          .eq("direction", "outbound")
+          .is("external_ccid", null)
+          .gte("created_at", fiveMinAgo)
+          .order("created_at", { ascending: false })
+          .limit(10);
+        const toPlus = to.startsWith("+") ? to : `+${to}`;
+        const toBare = to.startsWith("+") ? to.slice(1) : to;
+        for (const c of (candidates || []) as Array<{
+          id: string;
+          call_control_id: string | null;
+          phone_number: string | null;
+        }>) {
+          const rawPhone = c.phone_number || "";
+          const p = cleanNumber(rawPhone);
+          const pPlus = p.startsWith("+") ? p : `+${p}`;
+          const pBare = p.startsWith("+") ? p.slice(1) : p;
+          const matched =
+            p === to ||
+            p === toPlus ||
+            p === toBare ||
+            pPlus === toPlus ||
+            pBare === toBare;
+          if (!matched) continue;
+          if (c.call_control_id === ccid) continue;
+          await adminOut
+            .from("call_logs")
+            .update({ external_ccid: ccid })
+            .eq("id", c.id);
+          console.log(
+            `[bridge/pair] outbound stamped external_ccid=${ccid} on row=${c.id} sdk_ccid=${c.call_control_id ?? "(none)"} to=${to}`
+          );
+          break;
+        }
       }
 
       // Capture the OTHER leg's ccid for blind transfer via SIP REFER.
