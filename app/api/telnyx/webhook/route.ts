@@ -1039,16 +1039,53 @@ export async function POST(req: NextRequest) {
 
       console.log(`[Webhook] hangup duration=${duration}s`);
 
-      const row = await findRecentCall(payload);
-      if (row) {
-        await updateRow(row.id, {
-          status: duration > 0 ? "completed" : "missed",
-          duration_seconds: duration,
-          call_control_id: ccid,
-        });
-        console.log(`[Webhook] hangup → ${duration > 0 ? "completed" : "missed"}, row ${row.id}`);
-      } else {
-        console.warn(`[Webhook] hangup — no row found`);
+      // ccid-first lookup. findRecentCall's 1-minute phone_number window
+      // silently misses any call longer than 60s — every multi-minute call
+      // gets stuck at status='connected' duration=0. ccid is the stable
+      // unique key for a leg, so match on that before falling back.
+      // (See David Madison's 32-min and 15-min calls on 2026-04-22.)
+      const finalStatus: "completed" | "missed" =
+        duration > 0 ? "completed" : "missed";
+      const hangupUpdates = {
+        status: finalStatus,
+        duration_seconds: duration,
+      };
+
+      const adminHu = getAdmin();
+      let resolvedRowId = "";
+      if (ccid) {
+        const { data: byCcid } = await adminHu
+          .from("call_logs")
+          .select("id")
+          .eq("call_control_id", ccid)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const byCcidId = (byCcid?.id as string | undefined) || "";
+        if (byCcidId) {
+          resolvedRowId = byCcidId;
+          await updateRow(resolvedRowId, hangupUpdates);
+          console.log(
+            `[Webhook] hangup → ${finalStatus}, row=${resolvedRowId} by ccid`
+          );
+        }
+      }
+
+      if (!resolvedRowId) {
+        const row = await findRecentCall(payload);
+        const rowId = (row?.id as string | undefined) || "";
+        if (rowId) {
+          resolvedRowId = rowId;
+          await updateRow(resolvedRowId, {
+            ...hangupUpdates,
+            call_control_id: ccid,
+          });
+          console.log(
+            `[Webhook] hangup → ${finalStatus}, row=${resolvedRowId} by phone fallback`
+          );
+        } else {
+          console.warn(`[Webhook] hangup — no row found`);
+        }
       }
       break;
     }
