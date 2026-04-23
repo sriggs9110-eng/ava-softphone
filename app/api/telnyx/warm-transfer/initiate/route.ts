@@ -56,6 +56,40 @@ export async function POST(req: NextRequest) {
     `[warm/initiate] request repCcid=${repCcid} targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(none)"} — hold`
   );
 
+  // Pre-flight: confirm the leg is still alive before /actions/hold.
+  // Without this, Telnyx returns a generic 404 that looks like a URL
+  // problem — this lets us give the UI a specific "call not connected
+  // yet" message instead of a misleading error.
+  try {
+    const probe = await fetch(
+      `https://api.telnyx.com/v2/calls/${targetCcid}`,
+      { headers: { Authorization: `Bearer ${apiKey}` } }
+    );
+    if (probe.ok) {
+      const pbody = (await probe.json().catch(() => ({}))) as {
+        data?: { is_alive?: boolean };
+      };
+      const alive = pbody?.data?.is_alive;
+      if (alive === false) {
+        console.log(
+          `[warm/initiate] call not alive, refusing hold targetCcid=${targetCcid}`
+        );
+        return NextResponse.json(
+          {
+            error:
+              "Call isn't connected yet. Wait until the other side picks up before transferring.",
+          },
+          { status: 409 }
+        );
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[warm/initiate] pre-flight probe threw — continuing to hold anyway:`,
+      (err as Error).message
+    );
+  }
+
   const res = await fetch(
     `https://api.telnyx.com/v2/calls/${targetCcid}/actions/hold`,
     {
