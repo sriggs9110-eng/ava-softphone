@@ -1104,7 +1104,18 @@ export async function POST(req: NextRequest) {
         duration = Math.floor(payload.duration_seconds as number);
       }
 
-      console.log(`[Webhook] hangup duration=${duration}s`);
+      // Surface Telnyx's hangup_cause + hangup_source so we can tell who
+      // dropped the call when "the call just dropped" reports come in.
+      // Common causes: normal_clearing (graceful end), call_rejected,
+      // user_busy, no_user_responding, originator_cancel,
+      // recovery_on_timer_expire, media_timeout, normal_temporary_failure.
+      // Common sources: caller (originator), callee (terminator), unknown.
+      const hangupCause = (payload?.hangup_cause as string | undefined) || "?";
+      const hangupSource = (payload?.hangup_source as string | undefined) || "?";
+      const sipCause = (payload?.sip_hangup_cause as string | undefined) || "";
+      console.log(
+        `[Webhook] hangup duration=${duration}s ccid=${ccid} cause=${hangupCause} source=${hangupSource}${sipCause ? ` sip=${sipCause}` : ""}`
+      );
 
       // ccid-first lookup. findRecentCall's 1-minute phone_number window
       // silently misses any call longer than 60s — every multi-minute call
