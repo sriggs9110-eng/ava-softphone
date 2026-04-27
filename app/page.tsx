@@ -260,21 +260,19 @@ export default function Home() {
   // Create call log in Supabase when making/receiving a call
   const handleMakeCall = useCallback(
     async (number: string) => {
-      // Server-originated outbound (default). Two-leg architecture so
-      // that /actions/transfer can address the customer's PSTN leg
-      // independently — fixes the long-running outbound transfer bug
-      // where transfer kept the rep and dropped the customer. The
-      // server inserts the call_logs row with external_ccid stamped
-      // at originate time. The rep's SDK auto-answers the resulting
-      // inbound INVITE via client_state matching (see useTelnyxClient).
-      //
-      // Set ?legacy_dial=1 to fall back to direct SDK.newCall for
-      // emergency rollback without redeploying.
-      const useLegacy =
+      // ROLLBACK 2026-04-27: defaulting back to SDK.newCall for normal
+      // outbound calls. The two-leg architecture (POST /api/telnyx/
+      // dial-outbound) hit USER_BUSY when Telnyx INVITEs the rep's own
+      // SIP credential — the credential's registration or concurrency
+      // setting flags it as busy, so the auto-answer code never gets
+      // to run. Outbound transfer is still broken on the legacy path
+      // but at least dialing works. Set ?new_dial=1 to opt into the
+      // experimental two-leg path for testing.
+      const useNew =
         typeof window !== "undefined" &&
-        new URL(window.location.href).searchParams.get("legacy_dial") === "1";
+        new URL(window.location.href).searchParams.get("new_dial") === "1";
 
-      if (useLegacy) {
+      if (!useNew) {
         const ccid = await makeCall(number);
         if (user) {
           const log = await insertCallLog({
