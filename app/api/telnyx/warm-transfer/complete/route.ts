@@ -112,44 +112,24 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Try /actions/bridge first — it merges customer's leg with the
-  // target call WITHOUT a hangup+redial. Cleaner UX: target's phone
-  // stays connected through the handoff.
-  console.log(
-    `[warm/complete] /actions/bridge customer_leg=${externalCcid} ↔ target_call=${targetRepCcid}`
-  );
-  const bridgeRes = await fetch(
-    `https://api.telnyx.com/v2/calls/${externalCcid}/actions/bridge`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ call_control_id: targetRepCcid }),
-    }
-  );
-  const bridgeData = await bridgeRes.json().catch(() => ({}));
-  console.log(
-    `[warm/complete] bridge status=${bridgeRes.status} body=${JSON.stringify(bridgeData).slice(0, 400)}`
-  );
+  // Reverted from /actions/bridge primary. Even with external_ccid
+  // pointing at the customer's PSTN leg, /actions/bridge between that
+  // leg and the consult call (target_call_ccid) returns HTTP 200 but
+  // silently produces a broken media state — Stephen tested:
+  // "able to speak to the third party but when I tried to make the
+  // transfer happen it dropped the whole call for all 3". The HTTP
+  // success makes the failure invisible to our fallback logic, so we
+  // can't recover gracefully.
+  //
+  // Sticking with hangup+transfer: target's phone gets briefly hung
+  // up and redialed, but the handoff completes reliably. Stephen
+  // confirmed the previous deploy of this path "worked successfully"
+  // — that's the path we keep.
 
-  if (bridgeRes.ok) {
-    return NextResponse.json({
-      success: true,
-      mode: "actions_bridge",
-      externalCcid,
-      targetCallCcid: targetRepCcid,
-    });
-  }
-
-  // Bridge failed — fall back to hangup-consult + /actions/transfer
-  // pattern that worked in the previous deploy. Target's phone gets a
-  // brief hangup-and-redial, but the handoff completes reliably.
+  // Step 1: hangup the consult call. Frees target's phone for redial.
   console.log(
-    `[warm/complete/fallback] bridge failed (${bridgeRes.status}); trying hangup+transfer`
+    `[warm/complete] step 1: hangup consult targetRepCcid=${targetRepCcid}`
   );
-
   const hangupRes = await fetch(
     `https://api.telnyx.com/v2/calls/${targetRepCcid}/actions/hangup`,
     {
@@ -163,9 +143,11 @@ export async function POST(req: NextRequest) {
   );
   const hangupBody = await hangupRes.json().catch(() => ({}));
   console.log(
-    `[warm/complete/fallback] hangup consult status=${hangupRes.status} body=${JSON.stringify(hangupBody).slice(0, 300)}`
+    `[warm/complete] hangup status=${hangupRes.status} body=${JSON.stringify(hangupBody).slice(0, 300)}`
   );
 
+  // Step 2: /actions/transfer the customer's leg to target's phone.
+  // Same primitive that works for blind transfer.
   const fromNumber = (repRow?.from_number as string | null) || null;
   const transferBody: Record<string, unknown> = { to: normalizedTarget };
   if (fromNumber && /^\+?\d{7,15}$/.test(fromNumber)) {
@@ -176,7 +158,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.log(
-    `[warm/complete/fallback] /actions/transfer customer_leg=${externalCcid} to=${normalizedTarget}`
+    `[warm/complete] step 2: /actions/transfer customer_leg=${externalCcid} to=${normalizedTarget}`
   );
   const transferRes = await fetch(
     `https://api.telnyx.com/v2/calls/${externalCcid}/actions/transfer`,
@@ -191,21 +173,20 @@ export async function POST(req: NextRequest) {
   );
   const transferData = await transferRes.json().catch(() => ({}));
   console.log(
-    `[warm/complete/fallback] transfer status=${transferRes.status} body=${JSON.stringify(transferData).slice(0, 400)}`
+    `[warm/complete] transfer status=${transferRes.status} body=${JSON.stringify(transferData).slice(0, 400)}`
   );
 
   if (!transferRes.ok) {
     const detail =
       transferData?.errors?.[0]?.detail ||
       transferData?.errors?.[0]?.title ||
-      bridgeData?.errors?.[0]?.detail ||
       "Warm transfer failed";
     return NextResponse.json({ error: detail }, { status: transferRes.status });
   }
 
   return NextResponse.json({
     success: true,
-    mode: "fallback_hangup_transfer",
+    mode: "hangup_transfer",
     externalCcid,
     targetPhoneNumber: normalizedTarget,
   });
