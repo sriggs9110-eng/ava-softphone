@@ -112,11 +112,44 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Step 1: hangup the consult call (rep ↔ target). Target's phone goes
-  // back to idle so it can accept the redial in step 2.
+  // Try /actions/bridge first — it merges customer's leg with the
+  // target call WITHOUT a hangup+redial. Cleaner UX: target's phone
+  // stays connected through the handoff.
   console.log(
-    `[warm/complete] step 1: hangup consult targetRepCcid=${targetRepCcid}`
+    `[warm/complete] /actions/bridge customer_leg=${externalCcid} ↔ target_call=${targetRepCcid}`
   );
+  const bridgeRes = await fetch(
+    `https://api.telnyx.com/v2/calls/${externalCcid}/actions/bridge`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ call_control_id: targetRepCcid }),
+    }
+  );
+  const bridgeData = await bridgeRes.json().catch(() => ({}));
+  console.log(
+    `[warm/complete] bridge status=${bridgeRes.status} body=${JSON.stringify(bridgeData).slice(0, 400)}`
+  );
+
+  if (bridgeRes.ok) {
+    return NextResponse.json({
+      success: true,
+      mode: "actions_bridge",
+      externalCcid,
+      targetCallCcid: targetRepCcid,
+    });
+  }
+
+  // Bridge failed — fall back to hangup-consult + /actions/transfer
+  // pattern that worked in the previous deploy. Target's phone gets a
+  // brief hangup-and-redial, but the handoff completes reliably.
+  console.log(
+    `[warm/complete/fallback] bridge failed (${bridgeRes.status}); trying hangup+transfer`
+  );
+
   const hangupRes = await fetch(
     `https://api.telnyx.com/v2/calls/${targetRepCcid}/actions/hangup`,
     {
@@ -130,15 +163,9 @@ export async function POST(req: NextRequest) {
   );
   const hangupBody = await hangupRes.json().catch(() => ({}));
   console.log(
-    `[warm/complete] hangup status=${hangupRes.status} body=${JSON.stringify(hangupBody).slice(0, 300)}`
+    `[warm/complete/fallback] hangup consult status=${hangupRes.status} body=${JSON.stringify(hangupBody).slice(0, 300)}`
   );
-  // Don't bail on hangup failure — call may have already ended; proceed
-  // to the transfer. If target really can't be reached the next step
-  // will fail with a clearer error.
 
-  // Step 2: /actions/transfer on the customer's leg with to=target_phone.
-  // Same primitive as blind transfer. Customer's leg is owned by the
-  // customer, so they stay bridged with the new outbound to target.
   const fromNumber = (repRow?.from_number as string | null) || null;
   const transferBody: Record<string, unknown> = { to: normalizedTarget };
   if (fromNumber && /^\+?\d{7,15}$/.test(fromNumber)) {
@@ -149,7 +176,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.log(
-    `[warm/complete] step 2: /actions/transfer on customer leg externalCcid=${externalCcid} to=${normalizedTarget} body=${JSON.stringify(transferBody)}`
+    `[warm/complete/fallback] /actions/transfer customer_leg=${externalCcid} to=${normalizedTarget}`
   );
   const transferRes = await fetch(
     `https://api.telnyx.com/v2/calls/${externalCcid}/actions/transfer`,
@@ -164,20 +191,21 @@ export async function POST(req: NextRequest) {
   );
   const transferData = await transferRes.json().catch(() => ({}));
   console.log(
-    `[warm/complete] transfer status=${transferRes.status} body=${JSON.stringify(transferData).slice(0, 400)}`
+    `[warm/complete/fallback] transfer status=${transferRes.status} body=${JSON.stringify(transferData).slice(0, 400)}`
   );
 
   if (!transferRes.ok) {
     const detail =
       transferData?.errors?.[0]?.detail ||
       transferData?.errors?.[0]?.title ||
-      "Transfer failed";
+      bridgeData?.errors?.[0]?.detail ||
+      "Warm transfer failed";
     return NextResponse.json({ error: detail }, { status: transferRes.status });
   }
 
   return NextResponse.json({
     success: true,
-    mode: "customer_leg_transfer",
+    mode: "fallback_hangup_transfer",
     externalCcid,
     targetPhoneNumber: normalizedTarget,
   });
