@@ -1,31 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-// Warm transfer — step 2a (Complete).
+// Warm transfer — Complete.
 //
-// Strategy: hangup the consult leg (rep ↔ target), then /actions/transfer
-// on the customer's PSTN inbound leg with `to=target_phone_number`. Telnyx
-// redials the target; when the target picks up, customer↔target is
-// bridged automatically because /actions/transfer keeps the
-// call_control_id's owner connected (and for the customer leg the owner
-// IS the customer). Rep drops naturally as Telnyx unbridges them.
+// PREVIOUS APPROACHES (all unreliable):
+//   1. /actions/bridge customer ↔ targetRepCcid (rep's SDK consult leg).
+//      Returned 200 OK silently producing broken media — call dropped
+//      for everyone.
+//   2. hangup consult + /actions/transfer customer to=number. Telnyx
+//      tears down target's phone via the consult hangup, then redials
+//      from the customer leg. The redial has been failing in the
+//      rep-first dial architecture: /actions/transfer on a server-
+//      originated leg returns "no longer active" or drops the third
+//      party (Stephen confirmed both).
 //
-// This replaces the earlier /actions/bridge approach, which produced an
-// undefined media state for warm transfer (Stephen's report: "dropped
-// the call for everyone except Pepper kept acting as if the call was
-// live"). /actions/bridge between two single-leg calls didn't reliably
-// merge the two PSTN sides.
+// CURRENT APPROACH: /actions/bridge between the customer's PSTN leg
+// (external_ccid on rep's row) and the consult-target's PSTN leg
+// (looked up from call_logs). This breaks both of the rep's bridges
+// atomically and joins customer↔target without ever hanging up the
+// target's phone — they stay connected end-to-end.
 //
-// /actions/transfer on the customer's leg with a phone number is the
-// SAME primitive that already works for blind transfer (commit
-// 39dc099). This makes warm transfer = consult + blind transfer at the
-// end, which is the standard SIP handoff pattern.
+// Finding the consult-target PSTN ccid: when the rep's SDK newCalls
+// the target, Telnyx allocates a separate ccid for the outbound PSTN
+// leg. The webhook on call.initiated inserts a call_logs row for it
+// (direction=outbound, phone_number=target, with session_id), so we
+// query for that row at complete-time.
 //
 // Body: { repCcid, targetRepCcid, targetPhoneNumber }
 //   repCcid             = rep's ccid on the original (held) call
-//   targetRepCcid       = rep's ccid on the outbound consult call
+//   targetRepCcid       = rep's ccid on the SDK consult call
 //   targetPhoneNumber   = phone number the rep typed for the transfer target
-// Returns: { success, externalCcid, targetPhoneNumber }
+// Returns: { success, mode, customerCcid, consultTargetCcid?, targetPhoneNumber }
 //
 // Logged with [warm/complete] prefix.
 export async function POST(req: NextRequest) {
@@ -112,25 +117,155 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Reverted from /actions/bridge primary. Even with external_ccid
-  // pointing at the customer's PSTN leg, /actions/bridge between that
-  // leg and the consult call (target_call_ccid) returns HTTP 200 but
-  // silently produces a broken media state — Stephen tested:
-  // "able to speak to the third party but when I tried to make the
-  // transfer happen it dropped the whole call for all 3". The HTTP
-  // success makes the failure invisible to our fallback logic, so we
-  // can't recover gracefully.
+  // Strategy: /actions/bridge customer's leg → consult-target's PSTN
+  // leg. The rep is in two simultaneous bridges (rep↔customer original
+  // call, and rep↔target consult call). Bridging customer↔target
+  // directly breaks BOTH of the rep's bridges atomically and joins
+  // customer↔target without ever hanging up target's phone (which is
+  // what the previous hangup+/actions/transfer path was doing — and
+  // failing on, because /actions/transfer on a server-originated leg
+  // has been unreliable with the rep-first dial architecture).
   //
-  // Sticking with hangup+transfer: target's phone gets briefly hung
-  // up and redialed, but the handoff completes reliably. Stephen
-  // confirmed the previous deploy of this path "worked successfully"
-  // — that's the path we keep.
+  // The catch: we need the consult-target's PSTN ccid. The rep's SDK
+  // only knows ITS leg of the consult (targetRepCcid); the PSTN leg
+  // Telnyx allocated to dial the target has a different ccid. The
+  // webhook on call.initiated inserts a call_logs row for that PSTN
+  // leg (direction=outbound, phone_number=targetPhoneNumber,
+  // call_session_id=<consult session>), which we can look up here.
 
-  // Step 1: hangup the consult call. Frees target's phone for redial.
+  // Step 1: find the consult-target's PSTN ccid. Most recent outbound
+  // row for targetPhoneNumber within the last ~3 minutes that is NOT
+  // the original customer leg.
+  const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+  const targetBare = normalizedTarget.startsWith("+")
+    ? normalizedTarget.slice(1)
+    : normalizedTarget;
+  const phoneCandidates = [normalizedTarget, targetBare];
+  let consultTargetCcid: string | null = null;
+  let consultRowId: string | null = null;
+  for (const p of phoneCandidates) {
+    const { data: rows } = await admin
+      .from("call_logs")
+      .select("id, call_control_id, call_session_id, created_at")
+      .eq("phone_number", p)
+      .eq("direction", "outbound")
+      .gte("created_at", cutoff)
+      .not("call_control_id", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    for (const r of (rows || []) as Array<{
+      id: string;
+      call_control_id: string | null;
+      call_session_id: string | null;
+      created_at: string;
+    }>) {
+      // Skip the original customer leg (already bridged with rep).
+      if (r.call_control_id === externalCcid) continue;
+      // Skip the rep's SDK consult leg if it happens to match.
+      if (r.call_control_id === targetRepCcid) continue;
+      // Skip the rep's main leg.
+      if (r.call_control_id === repCcid) continue;
+      consultTargetCcid = r.call_control_id;
+      consultRowId = r.id;
+      break;
+    }
+    if (consultTargetCcid) break;
+  }
+
+  if (!consultTargetCcid) {
+    console.error(
+      `[warm/complete] could NOT find consult-target PSTN ccid for to=${normalizedTarget} repCcid=${repCcid} customerCcid=${externalCcid} targetRepCcid=${targetRepCcid} — no call_logs row matched. Falling back to hangup+transfer.`
+    );
+    return await fallbackHangupTransfer({
+      apiKey,
+      targetRepCcid,
+      externalCcid,
+      normalizedTarget,
+      fromNumber: (repRow?.from_number as string | null) || null,
+    });
+  }
+
   console.log(
-    `[warm/complete] step 1: hangup consult targetRepCcid=${targetRepCcid}`
+    `[warm/complete] resolved consultTargetCcid=${consultTargetCcid} (row=${consultRowId}) — bridging customer=${externalCcid} → consultTarget=${consultTargetCcid}`
   );
-  const hangupRes = await fetch(
+
+  // Step 2: /actions/bridge customer leg → consult target leg. This is
+  // a single atomic operation in Telnyx: it breaks both existing
+  // bridges (rep↔customer and rep↔consultTarget) and joins
+  // customer↔consultTarget. Both rep legs become unbridged; Telnyx
+  // tears them down.
+  const bridgeRes = await fetch(
+    `https://api.telnyx.com/v2/calls/${externalCcid}/actions/bridge`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ call_control_id: consultTargetCcid }),
+    }
+  );
+  const bridgeData = await bridgeRes.json().catch(() => ({}));
+  console.log(
+    `[warm/complete] bridge status=${bridgeRes.status} customerCcid=${externalCcid} consultTargetCcid=${consultTargetCcid} body=${JSON.stringify(bridgeData).slice(0, 400)}`
+  );
+
+  if (!bridgeRes.ok) {
+    const detail =
+      bridgeData?.errors?.[0]?.detail ||
+      bridgeData?.errors?.[0]?.title ||
+      "Bridge failed";
+    console.error(
+      `[warm/complete] bridge FAILED ${bridgeRes.status} — falling back to hangup+transfer: ${detail}`
+    );
+    return await fallbackHangupTransfer({
+      apiKey,
+      targetRepCcid,
+      externalCcid,
+      normalizedTarget,
+      fromNumber: (repRow?.from_number as string | null) || null,
+    });
+  }
+
+  // Stamp Row A's external_ccid → consultTargetCcid so the new bridged
+  // leg becomes the addressable customer leg for any subsequent
+  // transfer the rep might do (chain transfer). Best-effort.
+  try {
+    await admin
+      .from("call_logs")
+      .update({ external_ccid: consultTargetCcid })
+      .eq("call_control_id", repCcid);
+  } catch {
+    /* ignore */
+  }
+
+  return NextResponse.json({
+    success: true,
+    mode: "actions_bridge",
+    customerCcid: externalCcid,
+    consultTargetCcid,
+    targetPhoneNumber: normalizedTarget,
+  });
+}
+
+// Fallback: the legacy hangup+transfer path. Used when we can't find
+// the consult-target's PSTN ccid (race / missing call_logs row) or
+// when /actions/bridge fails. Imperfect — Stephen has reported this
+// path dropping the third party — but better than no transfer attempt.
+async function fallbackHangupTransfer(args: {
+  apiKey: string;
+  targetRepCcid: string;
+  externalCcid: string;
+  normalizedTarget: string;
+  fromNumber: string | null;
+}): Promise<NextResponse> {
+  const { apiKey, targetRepCcid, externalCcid, normalizedTarget, fromNumber } =
+    args;
+
+  console.log(
+    `[warm/complete/fallback] hangup consult targetRepCcid=${targetRepCcid}`
+  );
+  await fetch(
     `https://api.telnyx.com/v2/calls/${targetRepCcid}/actions/hangup`,
     {
       method: "POST",
@@ -140,15 +275,8 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({}),
     }
-  );
-  const hangupBody = await hangupRes.json().catch(() => ({}));
-  console.log(
-    `[warm/complete] hangup status=${hangupRes.status} body=${JSON.stringify(hangupBody).slice(0, 300)}`
-  );
+  ).catch(() => {});
 
-  // Step 2: /actions/transfer the customer's leg to target's phone.
-  // Same primitive that works for blind transfer.
-  const fromNumber = (repRow?.from_number as string | null) || null;
   const transferBody: Record<string, unknown> = { to: normalizedTarget };
   if (fromNumber && /^\+?\d{7,15}$/.test(fromNumber)) {
     transferBody.from = fromNumber.startsWith("+") ? fromNumber : `+${fromNumber}`;
@@ -158,7 +286,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.log(
-    `[warm/complete] step 2: /actions/transfer customer_leg=${externalCcid} to=${normalizedTarget}`
+    `[warm/complete/fallback] /actions/transfer customer_leg=${externalCcid} to=${normalizedTarget}`
   );
   const transferRes = await fetch(
     `https://api.telnyx.com/v2/calls/${externalCcid}/actions/transfer`,
@@ -173,7 +301,7 @@ export async function POST(req: NextRequest) {
   );
   const transferData = await transferRes.json().catch(() => ({}));
   console.log(
-    `[warm/complete] transfer status=${transferRes.status} body=${JSON.stringify(transferData).slice(0, 400)}`
+    `[warm/complete/fallback] transfer status=${transferRes.status} body=${JSON.stringify(transferData).slice(0, 400)}`
   );
 
   if (!transferRes.ok) {
@@ -186,7 +314,7 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     success: true,
-    mode: "hangup_transfer",
+    mode: "fallback_hangup_transfer",
     externalCcid,
     targetPhoneNumber: normalizedTarget,
   });
