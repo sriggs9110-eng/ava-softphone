@@ -1124,9 +1124,11 @@ export async function POST(req: NextRequest) {
       // (See David Madison's 32-min and 15-min calls on 2026-04-22.)
       const finalStatus: "completed" | "missed" =
         duration > 0 ? "completed" : "missed";
-      const hangupUpdates = {
+      const hangupUpdates: Record<string, unknown> = {
         status: finalStatus,
         duration_seconds: duration,
+        hangup_cause: hangupCause === "?" ? null : hangupCause,
+        hangup_source: hangupSource === "?" ? null : hangupSource,
       };
 
       const adminHu = getAdmin();
