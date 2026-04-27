@@ -81,43 +81,47 @@ async function blindTransfer(args: {
 }): Promise<NextResponse> {
   const { callControlId, to, apiKey } = args;
 
-  // Blind transfer uses /actions/transfer on the EXTERNAL leg of the
-  // rep's existing bridge. REFER was rejected by Telnyx because it
-  // can't target a SIP address on their own domain; for PSTN hand-off,
-  // /actions/transfer with a plain phone number is the right primitive.
-  // The key correctness win is still targeting the external leg, not
-  // the rep's WebRTC leg — the prior version transferred the rep's
-  // side which collapsed the bridge.
+  // Blind transfer split by call direction:
   //
-  // external_ccid is stamped on call_logs by the call.bridged webhook
-  // handler. If it's not populated (e.g. call predates the feature),
-  // we fall back to the rep's ccid with a [transfer/fallback] warning.
+  // INBOUND: Telnyx confirmed in their docs that /actions/transfer
+  // bridges the call_control_id's owner with the new destination. For
+  // inbound calls the external_ccid we stamp at fan-out time IS the
+  // customer's PSTN inbound leg (whose "owner" is the customer), so
+  // /actions/transfer on it correctly bridges customer→new_dest and
+  // drops the rep's fan-out leg. Keep this path.
+  //
+  // OUTBOUND: the rep's SDK initiates a single Call Control leg whose
+  // "owner" is the rep. /actions/transfer on it bridges rep→new_dest
+  // and drops the customer — exactly the wrong direction (customer
+  // dropped, rep stuck on the line with the new party). Telnyx
+  // doesn't expose a target_legs param on /actions/transfer
+  // (target_legs="self" was tested and made things worse). The fix:
+  // mirror the inbound fan-out primitive — POST /v2/calls with
+  // link_to=outbound_ccid + bridge_on_answer=true. When Leg B
+  // (transfer destination) answers, Telnyx auto-bridges Leg B into
+  // the linked call. The rep's WebRTC leg drops as Telnyx tears down
+  // the original outbound bridge.
+  //
+  // ⚠ Theory not yet field-tested: this MAY still bridge the wrong
+  // side for outbound. If so, the next iteration is to fully refactor
+  // around an explicit /actions/bridge after originating Leg B. The
+  // diagnostic logging below ([transfer/blind/out] vs
+  // [transfer/blind/in]) makes it obvious which path ran.
 
   const admin = createAdminClient();
   const { data: logRow } = await admin
     .from("call_logs")
-    .select("id, call_control_id, external_ccid, phone_number, from_number")
+    .select(
+      "id, direction, call_control_id, external_ccid, phone_number, from_number"
+    )
     .eq("call_control_id", callControlId)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  const externalCcid =
-    (logRow?.external_ccid as string | null) || null;
+  const externalCcid = (logRow?.external_ccid as string | null) || null;
+  const direction = (logRow?.direction as string | null) || null;
 
-  const targetCcid = externalCcid || callControlId;
-  if (!externalCcid) {
-    console.log(
-      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} — transferring rep's leg (may fail)`
-    );
-  }
-
-  // `from` on /actions/transfer must be a Telnyx-owned number. Without
-  // it, Telnyx defaults to the original call's `to`, which for the
-  // external leg is the PSTN destination — rejected with "Unverified
-  // origination number D51". Priority: the business number that was
-  // used as caller-ID on the original call (from_number stamped by the
-  // webhook), then TELNYX_PHONE_NUMBER.
   const normalizedTo = to.startsWith("+") ? to : `+${to}`;
   const storedFrom = logRow?.from_number as string | null | undefined;
   const envFrom = process.env.TELNYX_PHONE_NUMBER;
@@ -128,13 +132,70 @@ async function blindTransfer(args: {
     fromNumber = envFrom.startsWith("+") ? envFrom : `+${envFrom}`;
   }
 
+  // OUTBOUND path: link_to + bridge_on_answer.
+  if (direction === "outbound") {
+    const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
+    if (!callControlAppId) {
+      return NextResponse.json(
+        { error: "TELNYX_CALL_CONTROL_APP_ID not configured" },
+        { status: 500 }
+      );
+    }
+    const bodySent: Record<string, unknown> = {
+      to: normalizedTo,
+      from: fromNumber || normalizedTo,
+      connection_id: callControlAppId,
+      link_to: callControlId,
+      bridge_on_answer: true,
+      bridge_intent: true,
+      timeout_secs: 30,
+    };
+    console.log(
+      `[transfer/blind/out] request originating new leg link_to=${callControlId} to=${normalizedTo} from=${fromNumber ?? "(none)"}`
+    );
+    const res = await fetch(`${TELNYX_API}/calls`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(bodySent),
+    });
+    const data = await res.json().catch(() => ({}));
+    console.log(
+      `[transfer/blind/out] response status=${res.status} body=${JSON.stringify(data).slice(0, 600)}`
+    );
+    if (!res.ok) {
+      const detail =
+        data?.errors?.[0]?.detail ||
+        data?.errors?.[0]?.title ||
+        "Outbound transfer (link_to) failed";
+      return NextResponse.json({ error: detail }, { status: res.status });
+    }
+    return NextResponse.json({
+      success: true,
+      mode: "outbound_link_to",
+      new_leg_ccid: data?.data?.call_control_id,
+    });
+  }
+
+  // INBOUND path (and fallback when direction is unknown):
+  // /actions/transfer on the external_ccid (or repCcid as last-ditch
+  // fallback for legacy rows without a stamped external).
+  const targetCcid = externalCcid || callControlId;
+  if (!externalCcid) {
+    console.log(
+      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} (direction=${direction ?? "?"}) — transferring rep's leg (may fail)`
+    );
+  }
+
   const bodySent: Record<string, unknown> = { to: normalizedTo };
   if (fromNumber) bodySent.from = fromNumber;
 
   const endpoint = `${TELNYX_API}/calls/${targetCcid}/actions/transfer`;
 
   console.log(
-    `[transfer/blind] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${normalizedTo} bodySent=${JSON.stringify(
+    `[transfer/blind/in] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${normalizedTo} bodySent=${JSON.stringify(
       bodySent
     )}`
   );
@@ -150,7 +211,7 @@ async function blindTransfer(args: {
   const data = await res.json().catch(() => ({}));
 
   console.log(
-    `[transfer/blind] response status=${res.status} responseBody=${JSON.stringify(
+    `[transfer/blind/in] response status=${res.status} responseBody=${JSON.stringify(
       data
     )}`
   );
@@ -161,13 +222,13 @@ async function blindTransfer(args: {
       data?.errors?.[0]?.title ||
       "Blind transfer failed";
     console.log(
-      `[transfer/blind] FAILED ${res.status} targetCcid=${targetCcid} to=${normalizedTo}: ${detail}`
+      `[transfer/blind/in] FAILED ${res.status} targetCcid=${targetCcid} to=${normalizedTo}: ${detail}`
     );
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
   console.log(
-    `[transfer/blind] ok targetCcid=${targetCcid} to=${normalizedTo} — waiting for hangup of rep's leg`
+    `[transfer/blind/in] ok targetCcid=${targetCcid} to=${normalizedTo} — waiting for hangup of rep's leg`
   );
 
   return NextResponse.json({
