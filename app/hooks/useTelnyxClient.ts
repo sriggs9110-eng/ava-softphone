@@ -91,6 +91,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   const clientRef = useRef<TelnyxRTC | null>(null);
   const callRef = useRef<Call | null>(null);
   const transferCallRef = useRef<Call | null>(null);
+  const transferTargetNumberRef = useRef<string | null>(null);
   const callStartRef = useRef<number | null>(null);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("disconnected");
@@ -377,6 +378,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
 
               if (transferCallRef.current && call.id === transferCallRef.current.id) {
                 transferCallRef.current = null;
+                transferTargetNumberRef.current = null;
                 setTransferCall(null);
                 if (callRef.current) {
                   callRef.current.unhold().catch(() => {});
@@ -421,6 +423,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
               if (transferCallRef.current) {
                 transferCallRef.current.hangup();
                 transferCallRef.current = null;
+                transferTargetNumberRef.current = null;
                 setTransferCall(null);
               }
 
@@ -599,6 +602,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
         remoteElement: audioRef.current || undefined,
       });
       transferCallRef.current = tCall;
+      transferTargetNumberRef.current = targetNumber;
       setTransferCall({
         number: targetNumber,
         direction: "outbound",
@@ -711,11 +715,12 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       console.warn("[warm] unhold before bridge threw (continuing):", err);
     }
 
+    const targetPhoneNumber = transferTargetNumberRef.current || "";
     try {
       const res = await fetch("/api/telnyx/warm-transfer/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repCcid, targetRepCcid }),
+        body: JSON.stringify({ repCcid, targetRepCcid, targetPhoneNumber }),
       });
       const data = await res.json().catch(() => ({}));
       transferDebug("warmTransferComplete — response", { status: res.status, data });
@@ -736,9 +741,12 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       return;
     }
 
-    // Telnyx is bridging the two external legs. Rep's WebRTC legs will
-    // receive BYEs and our hangup handler cleans up the state. Collapse
-    // the transfer-panel UI now.
+    // Telnyx is bridging the two external legs. Rep's WebRTC legs
+    // should receive BYEs from Telnyx as the bridge completes; our
+    // existing callUpdate handler clears state on those events. Collapse
+    // the transfer-panel UI now (UI is rep-driven; doesn't affect the
+    // server-side bridge). Don't force-hangup here — early hangup tore
+    // down media before the bridge completed in earlier tests.
     setTransferCall(null);
   }, []);
 
