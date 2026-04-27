@@ -128,7 +128,20 @@ async function blindTransfer(args: {
     fromNumber = envFrom.startsWith("+") ? envFrom : `+${envFrom}`;
   }
 
-  const bodySent: Record<string, unknown> = { to: normalizedTo };
+  // For OUTBOUND SDK calls (single Call Control leg), Telnyx's default
+  // /actions/transfer keeps the originator side (rep's WebRTC) bridged
+  // to the new dial and drops the OPPOSITE side (the customer). That's
+  // backwards from what we want — we want the customer redirected and
+  // the rep dropped. target_legs="self" tells Telnyx to replace the
+  // SELF leg (the one that owns this ccid = the originator) with the
+  // new dial, so the OPPOSITE side (customer) gets bridged to it.
+  // Documented for /actions/dtmf as "self|opposite"; not officially
+  // listed for /actions/transfer but Telnyx's API often accepts it
+  // silently. Harmless if ignored.
+  const bodySent: Record<string, unknown> = {
+    to: normalizedTo,
+    target_legs: "self",
+  };
   if (fromNumber) bodySent.from = fromNumber;
 
   const endpoint = `${TELNYX_API}/calls/${targetCcid}/actions/transfer`;
