@@ -3,29 +3,39 @@ import { createClient as createServerClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getLocalNumber } from "@/app/lib/local-presence";
 
-// Outbound dial — server-originated to give us TWO addressable Call
-// Control legs (customer + rep) instead of the single leg the SDK gives
-// us when it INVITEs Telnyx directly.
+// Outbound dial — rep-first, webhook-driven customer originate.
 //
-// Why: Telnyx's /actions/transfer always keeps the call_control_id's
-// owner connected to the new destination. For SDK-originated outbound
-// calls the rep is the owner, so transfer drops the customer instead
-// of the rep — exactly the wrong direction. By originating server-side
-// we get a separate ccid for the customer's PSTN leg, and transfer on
-// THAT leg correctly drops the rep. Mirrors the inbound fan-out
-// pattern (fanOutToAgents in webhook/route.ts) which is field-tested.
+// History (read this before changing anything):
 //
-// Flow:
-//   1. POST /v2/calls to=customer_number, from=business_number
-//      → Leg A (ccid_A) = the customer's PSTN leg
-//   2. POST /v2/calls to=sip:rep_sip_username, link_to=ccid_A,
-//      bridge_on_answer=true
-//      → Leg B (ccid_B) = the rep's WebRTC leg
-//   3. Rep's SDK auto-answers Leg B (detected via client_state).
-//   4. Telnyx auto-bridges A + B on answer.
+// V1 (commit 638e517) originated Leg A (customer) THEN Leg B (rep) with
+// `link_to=customerCcid` + `bridge_on_answer`. Two failures stacked on
+// top of each other:
+//
+//   1. The Telnyx WebRTC SDK does NOT extract client_state from incoming
+//      INVITE messages — only from Bye (verified in @telnyx/webrtc source,
+//      BaseCall.ts handleMessage, VertoMethod.Bye case). The SDK has a
+//      literal `// TODO: manage caller_id_name, caller_id_number,
+//      callee_id_name, callee_id_number` next to incoming-invite handling.
+//      So the rep's auto-answer keyed off `call.options.clientState`
+//      could never match — that field is empty on inbound INVITEs.
+//   2. `link_to` propagates the linked leg's failure cause to the new
+//      leg. When Leg A's PSTN hop returned USER_BUSY (real telco busy or
+//      any other failure), Leg B got hung up with the SAME cause, even
+//      though the rep's SDK had received and was processing the INVITE.
+//      The "ringing → USER_BUSY" sequence in Stephen's diagnostic matches
+//      this exactly.
+//
+// V2 (this file): originate ONLY the rep leg here. Auto-answer is keyed
+// off a client-side `outboundDialExpectRef` that the page sets before
+// calling this endpoint — no SIP metadata propagation required. Once
+// Telnyx fires `call.answered` for the rep's leg, our webhook decodes
+// `client_state` (which DOES propagate to webhook payloads) and
+// originates the customer leg with link_to=repCcid + bridge_on_answer.
+// By that point the linked leg is ACTIVE, mirroring the inbound fan-out
+// pattern that's been field-tested.
 //
 // Body: { to: string, from?: string }
-// Returns: { success, customerCcid, repCcid }
+// Returns: { success, repCcid }
 //
 // Logged with [dial/outbound] prefix.
 
@@ -52,7 +62,6 @@ export async function POST(req: NextRequest) {
 
   const normalizedTo = to.startsWith("+") ? to : `+${to}`;
 
-  // Look up the calling rep's sip_username from their auth session.
   const supabase = await createServerClient();
   const {
     data: { user },
@@ -79,8 +88,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Caller-ID: explicit `from` from client (local-presence override) or
-  // pick a number from the pool by destination area code.
   const fromNumber = from || (await getLocalNumber(normalizedTo));
   if (!fromNumber) {
     return NextResponse.json(
@@ -89,60 +96,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Step 1: originate Leg A to the customer.
-  console.log(
-    `[dial/outbound] step 1: dial customer to=${normalizedTo} from=${fromNumber}`
-  );
-  const legAResp = await fetch(`${TELNYX_API}/calls`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      connection_id: callControlAppId,
-      to: normalizedTo,
-      from: fromNumber,
-      record: "record-from-answer",
-    }),
-  });
-  const legA = await legAResp.json().catch(() => ({}));
-  if (!legAResp.ok) {
-    const detail =
-      legA?.errors?.[0]?.detail ||
-      legA?.errors?.[0]?.title ||
-      "Customer dial failed";
-    console.error(`[dial/outbound] Leg A FAILED ${legAResp.status}: ${detail}`);
-    return NextResponse.json({ error: detail }, { status: legAResp.status });
-  }
-  const customerCcid = legA?.data?.call_control_id as string | undefined;
-  const customerSession = legA?.data?.call_session_id as string | undefined;
-  if (!customerCcid) {
-    console.error(`[dial/outbound] Leg A response missing ccid: ${JSON.stringify(legA).slice(0, 400)}`);
-    return NextResponse.json(
-      { error: "Telnyx returned no ccid for customer leg" },
-      { status: 500 }
-    );
-  }
-  console.log(
-    `[dial/outbound] Leg A ok customerCcid=${customerCcid} session=${customerSession}`
-  );
-
-  // Step 2: originate Leg B to the rep's SIP credential, linked to
-  // Leg A. Telnyx auto-bridges when Leg B answers.
+  // Originate Leg B (rep) ONLY. Customer leg follows on call.answered
+  // webhook — see app/api/telnyx/webhook/route.ts.
+  //
+  // client_state carries everything the webhook needs to dial the
+  // customer: target number, caller-ID, and the user_id we'll use to
+  // stamp call_logs. Telnyx propagates this base64 blob on every
+  // subsequent webhook event for this ccid.
   const sipUri = `sip:${sipUsername}@sip.telnyx.com`;
-  // client_state encodes "outbound_dial" so the rep's SDK auto-answers
-  // without showing inbound-call UI. Base64-encoded JSON.
   const clientState = Buffer.from(
     JSON.stringify({
-      type: "outbound_dial",
-      to: normalizedTo,
+      type: "outbound_dial_pending",
+      customer: normalizedTo,
       from: fromNumber,
       user_id: user.id,
     })
   ).toString("base64");
   console.log(
-    `[dial/outbound] step 2: dial rep sip=${sipUri} link_to=${customerCcid}`
+    `[dial/outbound] originate rep sip=${sipUri} customer=${normalizedTo} from=${fromNumber}`
   );
   const legBResp = await fetch(`${TELNYX_API}/calls`, {
     method: "POST",
@@ -154,9 +125,6 @@ export async function POST(req: NextRequest) {
       connection_id: callControlAppId,
       to: sipUri,
       from: fromNumber,
-      link_to: customerCcid,
-      bridge_on_answer: true,
-      bridge_intent: true,
       timeout_secs: 30,
       client_state: clientState,
     }),
@@ -167,54 +135,52 @@ export async function POST(req: NextRequest) {
       legB?.errors?.[0]?.detail ||
       legB?.errors?.[0]?.title ||
       "Rep dial failed";
-    console.error(`[dial/outbound] Leg B FAILED ${legBResp.status}: ${detail}`);
-    // Hangup the customer leg we just originated so we don't leave a
-    // ringing zombie.
-    fetch(`${TELNYX_API}/calls/${customerCcid}/actions/hangup`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }).catch(() => {});
+    console.error(
+      `[dial/outbound] rep originate FAILED ${legBResp.status}: ${detail}`
+    );
     return NextResponse.json({ error: detail }, { status: legBResp.status });
   }
   const repCcid = legB?.data?.call_control_id as string | undefined;
   const repSession = legB?.data?.call_session_id as string | undefined;
+  if (!repCcid) {
+    console.error(
+      `[dial/outbound] rep originate response missing ccid: ${JSON.stringify(legB).slice(0, 400)}`
+    );
+    return NextResponse.json(
+      { error: "Telnyx returned no ccid for rep leg" },
+      { status: 500 }
+    );
+  }
   console.log(
-    `[dial/outbound] Leg B ok repCcid=${repCcid} session=${repSession}`
+    `[dial/outbound] rep originate ok repCcid=${repCcid} session=${repSession}`
   );
 
-  // Stamp the call_logs row at pairing time. external_ccid points at
-  // the customer's leg — exactly what /actions/transfer needs to drop
-  // the rep and redirect the customer to a new destination.
-  if (repCcid) {
-    const { data: logRow, error: logErr } = await admin
-      .from("call_logs")
-      .insert({
-        user_id: user.id,
-        direction: "outbound",
-        phone_number: normalizedTo,
-        from_number: fromNumber,
-        status: "ringing",
-        call_control_id: repCcid,
-        external_ccid: customerCcid,
-        call_session_id: repSession || customerSession || null,
-      })
-      .select("id")
-      .single();
-    if (logErr) {
-      console.error(
-        `[dial/outbound] call_logs insert failed:`,
-        logErr.message
-      );
-    } else {
-      console.log(
-        `[bridge/pair] outbound stamped external_ccid=${customerCcid} on row=${logRow?.id} repCcid=${repCcid} session=${repSession ?? customerSession ?? "?"}`
-      );
-    }
+  // Pre-stamp call_logs with the rep ccid. external_ccid is filled in
+  // when the webhook originates the customer leg and stamps it back.
+  const { data: logRow, error: logErr } = await admin
+    .from("call_logs")
+    .insert({
+      user_id: user.id,
+      direction: "outbound",
+      phone_number: normalizedTo,
+      from_number: fromNumber,
+      status: "ringing",
+      call_control_id: repCcid,
+      call_session_id: repSession || null,
+    })
+    .select("id")
+    .single();
+  if (logErr) {
+    console.error(`[dial/outbound] call_logs insert failed:`, logErr.message);
+  } else {
+    console.log(
+      `[dial/outbound] call_logs row=${logRow?.id} repCcid=${repCcid} session=${repSession ?? "?"}`
+    );
   }
 
   return NextResponse.json({
     success: true,
-    customerCcid,
     repCcid,
+    fromNumber,
   });
 }

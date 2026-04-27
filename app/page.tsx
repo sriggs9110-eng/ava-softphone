@@ -132,6 +132,8 @@ export default function Home() {
     voicemailDrop,
     changeAgentStatus,
     setCallHistory: setLocalCallHistory,
+    markOutboundDialExpected,
+    clearOutboundDialExpected,
   } = useTelnyxClient(handleCallEnd);
 
   const [activePage, setActivePage] = useState<NavPage>("phone");
@@ -260,19 +262,17 @@ export default function Home() {
   // Create call log in Supabase when making/receiving a call
   const handleMakeCall = useCallback(
     async (number: string) => {
-      // ROLLBACK 2026-04-27: defaulting back to SDK.newCall for normal
-      // outbound calls. The two-leg architecture (POST /api/telnyx/
-      // dial-outbound) hit USER_BUSY when Telnyx INVITEs the rep's own
-      // SIP credential — the credential's registration or concurrency
-      // setting flags it as busy, so the auto-answer code never gets
-      // to run. Outbound transfer is still broken on the legacy path
-      // but at least dialing works. Set ?new_dial=1 to opt into the
-      // experimental two-leg path for testing.
-      const useNew =
+      // Two-leg outbound architecture (rep-first). See
+      // app/api/telnyx/dial-outbound/route.ts for the full design notes.
+      // The legacy SDK.newCall path remains accessible via ?legacy_dial=1
+      // as an escape hatch — its outbound transfer is structurally
+      // broken (single ccid, rep is owner, /actions/transfer drops the
+      // wrong side), so leave it OFF unless something's wrong.
+      const useLegacy =
         typeof window !== "undefined" &&
-        new URL(window.location.href).searchParams.get("new_dial") === "1";
+        new URL(window.location.href).searchParams.get("legacy_dial") === "1";
 
-      if (!useNew) {
+      if (useLegacy) {
         const ccid = await makeCall(number);
         if (user) {
           const log = await insertCallLog({
@@ -293,6 +293,11 @@ export default function Home() {
         return;
       }
 
+      // Arm the auto-answer ref BEFORE the fetch — Telnyx's INVITE to
+      // the rep's SDK can race ahead of our /dial-outbound response on
+      // a fast network.
+      const normalizedCustomer = number.startsWith("+") ? number : `+${number}`;
+      markOutboundDialExpected(normalizedCustomer);
       try {
         const res = await fetch("/api/telnyx/dial-outbound", {
           method: "POST",
@@ -302,10 +307,11 @@ export default function Home() {
         const data = (await res.json().catch(() => ({}))) as {
           success?: boolean;
           repCcid?: string;
-          customerCcid?: string;
+          fromNumber?: string;
           error?: string;
         };
         if (!res.ok || !data?.success) {
+          clearOutboundDialExpected();
           console.error(
             "[Call] dial-outbound failed:",
             res.status,
@@ -316,17 +322,18 @@ export default function Home() {
         console.log(
           "[Call] outbound originated repCcid=",
           data.repCcid,
-          "customerCcid=",
-          data.customerCcid
+          "from=",
+          data.fromNumber
         );
-        // The server inserts call_logs at originate time, so we don't
-        // need a client-side insertCallLog here. The rep's SDK will
-        // auto-answer the inbound INVITE that lands shortly.
+        // Server pre-inserted the call_logs row keyed by repCcid; the
+        // webhook fills in external_ccid once the customer leg is
+        // originated on call.answered.
       } catch (err) {
+        clearOutboundDialExpected();
         console.error("[Call] dial-outbound threw:", err);
       }
     },
-    [makeCall, user]
+    [makeCall, user, markOutboundDialExpected, clearOutboundDialExpected]
   );
 
   const handleAnswerCall = useCallback(async () => {

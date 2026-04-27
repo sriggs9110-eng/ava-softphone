@@ -93,6 +93,19 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   const transferCallRef = useRef<Call | null>(null);
   const transferTargetNumberRef = useRef<string | null>(null);
   const callStartRef = useRef<number | null>(null);
+  // Set by the page just before calling /api/telnyx/dial-outbound. The
+  // SDK doesn't expose client_state on incoming INVITEs (verified in the
+  // @telnyx/webrtc source — VertoMethod handles client_state on Bye only,
+  // and there's a `// TODO: manage caller_id_*` next to inbound invite
+  // handling). So we can't tag the auto-answer leg via SIP metadata. The
+  // ref carries the marker out-of-band: when the rep just clicked Dial
+  // and the server-originated rep leg INVITES this SDK, the next
+  // "ringing inbound" notification within the expiration window is the
+  // one to auto-answer.
+  const outboundDialExpectRef = useRef<{
+    customer: string;
+    expiresAt: number;
+  } | null>(null);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("disconnected");
   const [activeCall, setActiveCall] = useState<ActiveCallInfo | null>(null);
@@ -276,68 +289,37 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
 
             if (state === "ringing" && call.direction === "inbound") {
               // Outbound-dial auto-answer. The /api/telnyx/dial-outbound
-              // endpoint originates two legs server-side (customer +
-              // rep) and INVITEs the rep's SIP endpoint with a
-              // base64-encoded client_state marker {type: "outbound_dial"}.
-              // From Telnyx's perspective this is an "inbound" call to
-              // the rep's credential, but it's actually the second leg
-              // of an outbound dial the rep just initiated. Auto-answer
-              // silently and tag the call as outbound for the active-
-              // call UI flow downstream.
-              const tryAutoAnswerOutboundDial = (): boolean => {
-                // Diagnostic: dump everything the SDK gives us so we
-                // can see how Telnyx is actually delivering the marker.
-                const opts = (call.options || {}) as Record<string, unknown>;
-                const cs = (opts.clientState ||
-                  (opts as { client_state?: string }).client_state ||
-                  "") as string;
-                const cause = (call as unknown as { cause?: string }).cause;
-                console.log("[Telnyx] inbound ringing diagnostics:", {
-                  clientStateRaw: cs ? cs.slice(0, 120) : "(none)",
-                  clientStateLen: cs ? cs.length : 0,
-                  callerNumber: opts.callerNumber,
-                  destinationNumber: opts.destinationNumber,
-                  remoteCallerName: (call as unknown as { remoteCallerName?: string })
-                    .remoteCallerName,
-                  cause,
-                });
-                if (!cs) return false;
-                // Try base64 decode first, fall back to raw JSON.
-                let decoded: { type?: string; to?: string } | null = null;
-                try {
-                  decoded = JSON.parse(atob(cs));
-                } catch {
-                  try {
-                    decoded = JSON.parse(cs);
-                  } catch {
-                    /* not JSON either */
-                  }
-                }
-                console.log("[Telnyx] decoded client_state:", decoded);
-                if (decoded?.type !== "outbound_dial") return false;
+              // endpoint originates the rep leg server-side; Telnyx then
+              // INVITEs this SDK as if it were an inbound call. Match
+              // by the page's outboundDialExpectRef (set just before the
+              // /dial-outbound fetch) — NOT by client_state, which the
+              // SDK doesn't expose on incoming invites.
+              const expect = outboundDialExpectRef.current;
+              if (expect && expect.expiresAt > Date.now()) {
+                outboundDialExpectRef.current = null; // consume once
                 console.log(
-                  "[Telnyx] outbound_dial auto-answer to=",
-                  decoded.to
+                  "[Telnyx] outbound-dial auto-answer customer=",
+                  expect.customer
                 );
                 try {
+                  // Flip direction + stamp destinationNumber so the
+                  // active-call UI renders as outbound to the customer.
                   (call as unknown as { direction?: string }).direction =
                     "outbound";
                   (
                     call.options as unknown as {
                       destinationNumber?: string;
-                      callerNumber?: string;
                     }
-                  ).destinationNumber = decoded.to;
+                  ).destinationNumber = expect.customer;
                 } catch {}
                 try {
                   call.answer();
-                  return true;
+                  return;
                 } catch (err) {
                   console.error("[Telnyx] auto-answer threw:", err);
-                  return false;
+                  // fall through to the inbound flow as a safety net
                 }
-              };
-              if (tryAutoAnswerOutboundDial()) return;
+              }
 
               // Defense-in-depth auto-reject. With per-user SIP
               // credentials the server-side dispatchRingGroup already
@@ -514,6 +496,20 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       setConnectionStatus("disconnected");
     }
   }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw, startQualityMonitor, stopQualityMonitor]);
+
+  // Page calls this just before POSTing /api/telnyx/dial-outbound so the
+  // very next "ringing inbound" INVITE we receive auto-answers as the
+  // outbound leg. The flag is consumed on the first match or on expiry.
+  const markOutboundDialExpected = useCallback((customer: string) => {
+    outboundDialExpectRef.current = {
+      customer,
+      expiresAt: Date.now() + 15_000,
+    };
+  }, []);
+
+  const clearOutboundDialExpected = useCallback(() => {
+    outboundDialExpectRef.current = null;
+  }, []);
 
   const makeCall = useCallback(
     async (number: string): Promise<string | undefined> => {
@@ -932,5 +928,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     voicemailDrop,
     changeAgentStatus,
     setCallHistory,
+    markOutboundDialExpected,
+    clearOutboundDialExpected,
   };
 }

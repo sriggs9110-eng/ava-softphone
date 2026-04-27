@@ -139,6 +139,118 @@ async function fanOutToAgents({
   await Promise.all(dials);
 }
 
+// Phase 2 of the rep-first outbound architecture (see
+// app/api/telnyx/dial-outbound/route.ts for context). When the rep leg
+// answers, originate the customer leg with link_to=repCcid +
+// bridge_on_answer=true. By now the rep leg is ACTIVE, so a customer-
+// side failure (PSTN busy, bad number, rate limit) stays scoped to the
+// customer leg — link_to no longer leaks the cause back to the rep.
+//
+// Returns true if it acted (so caller knows to skip the rest of the
+// answered-handler? No — we still want recording / status updates to
+// run on the rep leg as normal. Caller proceeds either way; the return
+// is only for logging.)
+async function maybeDialOutboundCustomerLeg(args: {
+  repCcid: string;
+  clientStateB64: string | undefined;
+}): Promise<boolean> {
+  const { repCcid, clientStateB64 } = args;
+  if (!clientStateB64) return false;
+
+  let decoded: {
+    type?: string;
+    customer?: string;
+    from?: string;
+    user_id?: string;
+  } | null = null;
+  try {
+    decoded = JSON.parse(Buffer.from(clientStateB64, "base64").toString("utf8"));
+  } catch {
+    return false;
+  }
+  if (!decoded || decoded.type !== "outbound_dial_pending") return false;
+  if (!decoded.customer || !decoded.from) {
+    console.warn(
+      `[dial/outbound] customer-leg trigger missing fields on repCcid=${repCcid}`
+    );
+    return false;
+  }
+
+  const apiKey = process.env.TELNYX_API_KEY;
+  const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
+  if (!apiKey || !callControlAppId) {
+    console.error(
+      `[dial/outbound] missing TELNYX_API_KEY or TELNYX_CALL_CONTROL_APP_ID — cannot originate customer leg`
+    );
+    return false;
+  }
+
+  console.log(
+    `[dial/outbound] rep answered repCcid=${repCcid} — originating customer=${decoded.customer} from=${decoded.from}`
+  );
+  const res = await fetch("https://api.telnyx.com/v2/calls", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      connection_id: callControlAppId,
+      to: decoded.customer,
+      from: decoded.from,
+      link_to: repCcid,
+      bridge_on_answer: true,
+      bridge_intent: true,
+      timeout_secs: 30,
+      record: "record-from-answer",
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail =
+      data?.errors?.[0]?.detail || data?.errors?.[0]?.title || "unknown";
+    console.error(
+      `[dial/outbound] customer-leg originate FAILED ${res.status} repCcid=${repCcid}: ${detail}`
+    );
+    // Hangup the rep leg too — without a customer there's nothing to bridge.
+    await fetch(
+      `https://api.telnyx.com/v2/calls/${repCcid}/actions/hangup`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+      }
+    ).catch(() => {});
+    return false;
+  }
+  const customerCcid = data?.data?.call_control_id as string | undefined;
+  const customerSession = data?.data?.call_session_id as string | undefined;
+  console.log(
+    `[dial/outbound] customer-leg ok customerCcid=${customerCcid} session=${customerSession ?? "?"}`
+  );
+
+  // Stamp external_ccid on the rep's pre-existing call_logs row so
+  // transfer can target the customer leg deterministically.
+  if (customerCcid) {
+    try {
+      const admin = getAdmin();
+      await admin
+        .from("call_logs")
+        .update({ external_ccid: customerCcid })
+        .eq("call_control_id", repCcid)
+        .is("external_ccid", null);
+      console.log(
+        `[bridge/pair] outbound stamped external_ccid=${customerCcid} on repCcid=${repCcid}`
+      );
+    } catch (err) {
+      console.error(
+        `[dial/outbound] external_ccid stamp threw repCcid=${repCcid}:`,
+        (err as Error).message
+      );
+    }
+  }
+  return true;
+}
+
 // Dispatch ring-group fan-out: look up the group for the dialed number,
 // find available members, broadcast via Supabase Realtime, ring their
 // browsers via Call Control, and schedule a timeout hangup if nobody
@@ -899,6 +1011,16 @@ export async function POST(req: NextRequest) {
         callControlId: ccid,
       });
       if (vmHandled) break;
+
+      // Outbound-dial phase 2: rep just auto-answered the server-
+      // originated leg. Now originate the customer leg and bridge them.
+      // See dial-outbound/route.ts and maybeDialOutboundCustomerLeg.
+      if (eventType === "call.answered" && ccid) {
+        await maybeDialOutboundCustomerLeg({
+          repCcid: ccid,
+          clientStateB64: payload?.client_state as string | undefined,
+        });
+      }
 
       if (apiKey && ccid) {
         try {
