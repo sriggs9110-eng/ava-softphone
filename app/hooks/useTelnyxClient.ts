@@ -93,18 +93,25 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   const transferCallRef = useRef<Call | null>(null);
   const transferTargetNumberRef = useRef<string | null>(null);
   const callStartRef = useRef<number | null>(null);
-  // Set by the page just before calling /api/telnyx/dial-outbound. The
-  // SDK doesn't expose client_state on incoming INVITEs (verified in the
-  // @telnyx/webrtc source — VertoMethod handles client_state on Bye only,
-  // and there's a `// TODO: manage caller_id_*` next to inbound invite
-  // handling). So we can't tag the auto-answer leg via SIP metadata. The
-  // ref carries the marker out-of-band: when the rep just clicked Dial
-  // and the server-originated rep leg INVITES this SDK, the next
-  // "ringing inbound" notification within the expiration window is the
-  // one to auto-answer.
+  // Set by the page/hook just before kicking off a server-originated
+  // outbound dial OR a server-originated warm-transfer consult. The SDK
+  // doesn't expose client_state on incoming INVITEs (verified in
+  // @telnyx/webrtc source — VertoMethod handles client_state on Bye
+  // only), so we can't tag the auto-answer leg via SIP metadata. The
+  // ref carries the marker out-of-band: when the rep just clicked
+  // Dial/Warm-transfer and the server-originated leg INVITES this SDK,
+  // the next "ringing inbound" notification within the expiration
+  // window is the one to auto-answer.
+  //
+  // kind="main"    → main outbound dial; auto-answer routes the Call
+  //                  to callRef (becomes the active call).
+  // kind="consult" → warm-transfer consult; auto-answer routes the Call
+  //                  to transferCallRef so the existing call (callRef)
+  //                  stays intact as the held customer call.
   const outboundDialExpectRef = useRef<{
     customer: string;
     expiresAt: number;
+    kind: "main" | "consult";
   } | null>(null);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("disconnected");
@@ -288,18 +295,16 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
-              // Outbound-dial auto-answer. The /api/telnyx/dial-outbound
-              // endpoint originates the rep leg server-side; Telnyx then
-              // INVITEs this SDK as if it were an inbound call. Match
-              // by the page's outboundDialExpectRef (set just before the
-              // /dial-outbound fetch) — NOT by client_state, which the
-              // SDK doesn't expose on incoming invites.
+              // Auto-answer for server-originated legs. Two flavors:
+              //   kind="main"    → main outbound dial; routes to callRef.
+              //   kind="consult" → warm-transfer consult; routes to
+              //                    transferCallRef so the original call
+              //                    (which is on hold) stays intact.
               const expect = outboundDialExpectRef.current;
               if (expect && expect.expiresAt > Date.now()) {
                 outboundDialExpectRef.current = null; // consume once
                 console.log(
-                  "[Telnyx] outbound-dial auto-answer customer=",
-                  expect.customer
+                  `[Telnyx] auto-answer kind=${expect.kind} customer=${expect.customer}`
                 );
                 try {
                   // Flip direction + stamp destinationNumber so the
@@ -312,6 +317,23 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
                     }
                   ).destinationNumber = expect.customer;
                 } catch {}
+                if (expect.kind === "consult") {
+                  // Pre-bind to transferCallRef BEFORE answering so that
+                  // when state===active fires, the consult is recognized
+                  // as the transfer call and doesn't overwrite callRef
+                  // (which still points at the original held customer
+                  // call).
+                  transferCallRef.current = call;
+                  transferTargetNumberRef.current = expect.customer;
+                  setTransferCall({
+                    number: expect.customer,
+                    direction: "outbound",
+                    status: "dialing",
+                    startTime: null,
+                    isMuted: false,
+                    isHeld: false,
+                  });
+                }
                 try {
                   call.answer();
                   return;
@@ -497,15 +519,21 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     }
   }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw, startQualityMonitor, stopQualityMonitor]);
 
-  // Page calls this just before POSTing /api/telnyx/dial-outbound so the
-  // very next "ringing inbound" INVITE we receive auto-answers as the
-  // outbound leg. The flag is consumed on the first match or on expiry.
-  const markOutboundDialExpected = useCallback((customer: string) => {
-    outboundDialExpectRef.current = {
-      customer,
-      expiresAt: Date.now() + 15_000,
-    };
-  }, []);
+  // Page calls this just before POSTing /api/telnyx/dial-outbound (or
+  // before warmTransferStart triggers /api/telnyx/warm-transfer/start)
+  // so the very next "ringing inbound" INVITE we receive auto-answers
+  // and routes correctly. The flag is consumed on the first match or
+  // on expiry.
+  const markOutboundDialExpected = useCallback(
+    (customer: string, kind: "main" | "consult" = "main") => {
+      outboundDialExpectRef.current = {
+        customer,
+        expiresAt: Date.now() + 15_000,
+        kind,
+      };
+    },
+    []
+  );
 
   const clearOutboundDialExpected = useCallback(() => {
     outboundDialExpectRef.current = null;
@@ -619,27 +647,41 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   //
   // Client-side: once the hold lands, the rep's browser SDK-dials the
   // transfer target. The second WebRTC call is what lets the rep talk
-  // to B privately. When rep presses Complete or Cancel, the matching
-  // server endpoint bridges-or-unholds; the client cleans up B's SDK
-  // call.
   // Warm transfer — START.
   //
-  // Hold the customer via the SDK (Verto call.hold over WebSocket), then
-  // dial the transfer target as a second SDK call. HOLD IS CLIENT-SIDE:
-  // Telnyx's v2 Call Control HTTP API has NO /actions/hold endpoint
-  // (probed — every /hold* variant returns 404, while /speak /bridge
-  // /transfer etc. exist and return 422 on a dead call). The earlier
-  // server-side /warm-transfer/initiate → /actions/hold path was built
-  // on a non-existent endpoint. This replaces it with the SDK's
-  // Verto-level hold, which is the actual supported mechanism.
+  // Server-originates the consult call via /api/telnyx/warm-transfer/
+  // start. Why: SDK.newCall puts the consult on the rep's CREDENTIAL
+  // connection while the original customer leg lives on the CALL
+  // CONTROL APP. Bridging across those two worlds has been silently
+  // broken for warm-transfer Complete (Stephen's reports: 'dropped
+  // the third party', 'no longer active'). With server-originated
+  // consult, all four legs (rep+customer+rep_consult+target_consult)
+  // live in the Call Control App, and Complete is a single
+  // /actions/bridge between two known ccids.
+  //
+  // Steps:
+  //   1. SDK-side hold the original call (Verto call.hold). Customer
+  //      hears Telnyx hold music.
+  //   2. Mark outboundDialExpectRef kind=consult so the next "ringing
+  //      inbound" INVITE auto-answers AND routes to transferCallRef
+  //      (not callRef — the original held customer call must stay
+  //      addressable through callRef).
+  //   3. POST /api/telnyx/warm-transfer/start. Server originates rep_
+  //      consult leg + downstream target leg; the SDK auto-answers
+  //      rep_consult when Telnyx INVITES it.
   const warmTransferStart = useCallback(
     async (targetNumber: string): Promise<boolean> => {
       if (!clientRef.current || !callRef.current) return false;
       const active = callRef.current;
-      transferDebug("warmTransferStart — SDK hold", {
-        ccid: active.telnyxIDs?.telnyxCallControlId,
+      const repCcid = active.telnyxIDs?.telnyxCallControlId;
+      transferDebug("warmTransferStart — server-originated consult", {
+        repCcid,
         targetNumber,
       });
+      if (!repCcid) {
+        setMicError("Warm transfer failed: no call_control_id on active call.");
+        return false;
+      }
 
       try {
         await active.hold();
@@ -654,23 +696,64 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
         prev ? { ...prev, isHeld: true, status: "held" } : null
       );
 
-      const tCall = clientRef.current.newCall({
-        destinationNumber: targetNumber,
-        callerNumber: process.env.NEXT_PUBLIC_TELNYX_PHONE_NUMBER || "",
-        audio: true,
-        video: false,
-        remoteElement: audioRef.current || undefined,
-      });
-      transferCallRef.current = tCall;
-      transferTargetNumberRef.current = targetNumber;
-      setTransferCall({
-        number: targetNumber,
-        direction: "outbound",
-        status: "dialing",
-        startTime: null,
-        isMuted: false,
-        isHeld: false,
-      });
+      const normalizedTarget = targetNumber.startsWith("+")
+        ? targetNumber
+        : `+${targetNumber}`;
+
+      // Arm the auto-answer ref BEFORE the fetch — Telnyx's INVITE to
+      // the SDK can race ahead of our /start response on a fast network.
+      outboundDialExpectRef.current = {
+        customer: normalizedTarget,
+        kind: "consult",
+        expiresAt: Date.now() + 15_000,
+      };
+
+      try {
+        const res = await fetch("/api/telnyx/warm-transfer/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target: targetNumber, repCcid }),
+        });
+        const data = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          repConsultCcid?: string;
+          error?: string;
+        };
+        transferDebug("warmTransferStart — response", {
+          status: res.status,
+          data,
+        });
+        if (!res.ok || !data?.success) {
+          // Clear the expect ref so we don't accidentally auto-answer a
+          // real inbound that arrives within the 15s window.
+          outboundDialExpectRef.current = null;
+          // Roll back the hold so the rep can keep talking to the
+          // customer.
+          try {
+            await active.unhold();
+          } catch {}
+          setActiveCall((prev) =>
+            prev ? { ...prev, isHeld: false, status: "active" } : null
+          );
+          setTransferCall(null);
+          setMicError(
+            `Warm transfer failed: ${data?.error || "could not start consult"}.`
+          );
+          return false;
+        }
+      } catch (err) {
+        outboundDialExpectRef.current = null;
+        try {
+          await active.unhold();
+        } catch {}
+        setActiveCall((prev) =>
+          prev ? { ...prev, isHeld: false, status: "active" } : null
+        );
+        setTransferCall(null);
+        console.error("[warm] start threw:", err);
+        setMicError("Warm transfer failed: network error.");
+        return false;
+      }
       return true;
     },
     []
@@ -752,38 +835,42 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
 
   // Warm transfer — COMPLETE.
   //
-  // POSTs to /api/telnyx/warm-transfer/complete with both ccids. Server
-  // looks up their external_ccids and bridges the two carrier legs.
-  // Rep's two WebRTC legs drop naturally via callUpdate → hangup as
-  // Telnyx reassigns the bridges.
+  // POSTs /api/telnyx/warm-transfer/complete with the rep's two ccids.
+  // The server resolves both external_ccids (customer + target) from
+  // call_logs and issues ONE /actions/bridge customerCcid ↔
+  // targetConsultCcid. Both rep legs become unbridged; Telnyx tears
+  // them down; the SDK gets BYE on both and our callUpdate handler
+  // clears state.
   const warmTransferComplete = useCallback(async () => {
     if (!callRef.current || !transferCallRef.current) return;
     const repCcid = callRef.current.telnyxIDs.telnyxCallControlId;
-    const targetRepCcid =
+    const repConsultCcid =
       transferCallRef.current.telnyxIDs.telnyxCallControlId;
-    transferDebug("warmTransferComplete — POST /api/telnyx/warm-transfer/complete", {
-      repCcid,
-      targetRepCcid,
-    });
+    transferDebug(
+      "warmTransferComplete — POST /api/telnyx/warm-transfer/complete",
+      { repCcid, repConsultCcid }
+    );
 
-    // Unhold the original leg before the server bridges. Bridging into
-    // a held leg can leave the customer with no audio after the
-    // handoff; unholding first restores the media path.
+    // Unhold first so customer's audio path is open when Telnyx swaps
+    // the bridge target. Bridging into a held leg can leave the
+    // customer hearing silence after the handoff.
     try {
       await callRef.current.unhold();
     } catch (err) {
       console.warn("[warm] unhold before bridge threw (continuing):", err);
     }
 
-    const targetPhoneNumber = transferTargetNumberRef.current || "";
     try {
       const res = await fetch("/api/telnyx/warm-transfer/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repCcid, targetRepCcid, targetPhoneNumber }),
+        body: JSON.stringify({ repCcid, repConsultCcid }),
       });
       const data = await res.json().catch(() => ({}));
-      transferDebug("warmTransferComplete — response", { status: res.status, data });
+      transferDebug("warmTransferComplete — response", {
+        status: res.status,
+        data,
+      });
       if (!res.ok) {
         console.error(
           "[warm] complete failed:",
@@ -801,33 +888,47 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
       return;
     }
 
-    // Telnyx is bridging the two external legs. Rep's WebRTC legs
-    // should receive BYEs from Telnyx as the bridge completes; our
-    // existing callUpdate handler clears state on those events. Collapse
-    // the transfer-panel UI now (UI is rep-driven; doesn't affect the
-    // server-side bridge). Don't force-hangup here — early hangup tore
-    // down media before the bridge completed in earlier tests.
+    // Bridge accepted. Telnyx will hang up both rep legs; the
+    // callUpdate hangup handler clears state. Collapse the transfer-
+    // panel UI now (visual only).
     setTransferCall(null);
   }, []);
 
   // Warm transfer — CANCEL.
   //
-  // POSTs to /api/telnyx/warm-transfer/cancel to unhold the original
-  // caller's external leg. The client hangs up the target SDK leg;
-  // the rep is left talking to A again.
+  // The consult is server-originated, so the SDK can't tear it down
+  // by itself — POST /api/telnyx/warm-transfer/cancel which hangs up
+  // repConsultCcid server-side. Telnyx then drops the bridged target
+  // leg automatically. Client unholds the original call so the rep
+  // resumes talking to the customer.
   const warmTransferCancel = useCallback(async () => {
-    const repCcid = callRef.current?.telnyxIDs.telnyxCallControlId;
+    const repConsultCcid =
+      transferCallRef.current?.telnyxIDs?.telnyxCallControlId;
+
+    // Best-effort server-side hangup of the consult.
+    if (repConsultCcid) {
+      try {
+        await fetch("/api/telnyx/warm-transfer/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repConsultCcid }),
+        });
+      } catch (err) {
+        console.warn("[warm] cancel POST threw (continuing):", err);
+      }
+    }
+
+    // Tear down the SDK side too — Telnyx's BYE will arrive but a
+    // direct hangup is faster for UI snap-back.
     if (transferCallRef.current) {
       try {
         transferCallRef.current.hangup();
       } catch {}
       transferCallRef.current = null;
+      transferTargetNumberRef.current = null;
       setTransferCall(null);
     }
-    // SDK-side unhold — mirrors warmTransferStart's SDK-side hold.
-    // Server /warm-transfer/cancel is no longer needed (it targeted a
-    // non-existent /actions/unhold endpoint on Telnyx's v2 HTTP API).
-    void repCcid;
+
     if (callRef.current) {
       try {
         await callRef.current.unhold();

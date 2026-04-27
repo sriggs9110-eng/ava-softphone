@@ -369,6 +369,199 @@ async function maybeBridgeOutboundLegs(args: {
   return true;
 }
 
+// Warm transfer phase 2: rep_consult leg has answered (rep auto-
+// answered the server-originated consult INVITE). Originate the
+// consult target's PSTN leg, with client_state carrying the parent
+// repConsultCcid so phase 3 can find its way home.
+//
+// Mirrors maybeDialOutboundCustomerLeg but in the consult world.
+async function maybeDialConsultTargetLeg(args: {
+  repConsultCcid: string;
+  clientStateB64: string | undefined;
+}): Promise<boolean> {
+  const { repConsultCcid, clientStateB64 } = args;
+  if (!clientStateB64) return false;
+
+  let decoded: {
+    type?: string;
+    target?: string;
+    from?: string;
+    user_id?: string;
+    parent_rep_ccid?: string;
+  } | null = null;
+  try {
+    decoded = JSON.parse(Buffer.from(clientStateB64, "base64").toString("utf8"));
+  } catch {
+    return false;
+  }
+  if (!decoded || decoded.type !== "outbound_consult_pending") return false;
+  if (!decoded.target || !decoded.from) {
+    console.warn(
+      `[warm/consult] target-leg trigger missing fields on repConsultCcid=${repConsultCcid}`
+    );
+    return false;
+  }
+
+  // Idempotency: external_ccid stamped means we already dispatched.
+  const adminGuard = getAdmin();
+  const { data: existing } = await adminGuard
+    .from("call_logs")
+    .select("external_ccid")
+    .eq("call_control_id", repConsultCcid)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (existing?.external_ccid) {
+    console.log(
+      `[warm/consult] idempotent skip — external_ccid=${existing.external_ccid} already on repConsultCcid=${repConsultCcid}`
+    );
+    return false;
+  }
+
+  const apiKey = process.env.TELNYX_API_KEY;
+  const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
+  if (!apiKey || !callControlAppId) {
+    console.error(
+      `[warm/consult] missing TELNYX_API_KEY or TELNYX_CALL_CONTROL_APP_ID — cannot originate target leg`
+    );
+    return false;
+  }
+
+  const targetClientState = Buffer.from(
+    JSON.stringify({
+      type: "outbound_consult_target",
+      parent_rep_consult_ccid: repConsultCcid,
+      target: decoded.target,
+      from: decoded.from,
+      user_id: decoded.user_id,
+    })
+  ).toString("base64");
+
+  console.log(
+    `[warm/consult] rep_consult answered repConsultCcid=${repConsultCcid} — originating target=${decoded.target} from=${decoded.from}`
+  );
+  const res = await fetch("https://api.telnyx.com/v2/calls", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      connection_id: callControlAppId,
+      to: decoded.target,
+      from: decoded.from,
+      timeout_secs: 30,
+      client_state: targetClientState,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail =
+      data?.errors?.[0]?.detail || data?.errors?.[0]?.title || "unknown";
+    console.error(
+      `[warm/consult] target-leg originate FAILED ${res.status} repConsultCcid=${repConsultCcid}: ${detail}`
+    );
+    // Don't hang up the rep_consult leg here — let the rep see the
+    // failure and decide whether to retry or cancel via the UI.
+    return false;
+  }
+  const targetConsultCcid = data?.data?.call_control_id as string | undefined;
+  console.log(
+    `[warm/consult] target-leg ok targetConsultCcid=${targetConsultCcid}`
+  );
+
+  if (targetConsultCcid) {
+    try {
+      const admin = getAdmin();
+      await admin
+        .from("call_logs")
+        .update({ external_ccid: targetConsultCcid })
+        .eq("call_control_id", repConsultCcid)
+        .is("external_ccid", null);
+      console.log(
+        `[warm/consult] stamped external_ccid=${targetConsultCcid} on repConsultCcid=${repConsultCcid}`
+      );
+    } catch (err) {
+      console.error(
+        `[warm/consult] external_ccid stamp threw repConsultCcid=${repConsultCcid}:`,
+        (err as Error).message
+      );
+    }
+  }
+  return true;
+}
+
+// Warm transfer phase 3: target_consult leg has answered. Bridge it to
+// rep_consult so the rep is talking to the consult target. Mirrors
+// maybeBridgeOutboundLegs but in the consult world.
+async function maybeBridgeConsultLegs(args: {
+  targetConsultCcid: string;
+  clientStateB64: string | undefined;
+}): Promise<boolean> {
+  const { targetConsultCcid, clientStateB64 } = args;
+  if (!clientStateB64) return false;
+
+  let decoded: {
+    type?: string;
+    parent_rep_consult_ccid?: string;
+  } | null = null;
+  try {
+    decoded = JSON.parse(Buffer.from(clientStateB64, "base64").toString("utf8"));
+  } catch {
+    return false;
+  }
+  if (!decoded || decoded.type !== "outbound_consult_target") return false;
+  if (!decoded.parent_rep_consult_ccid) {
+    console.warn(
+      `[warm/consult] bridge trigger missing parent on targetConsultCcid=${targetConsultCcid}`
+    );
+    return false;
+  }
+
+  const apiKey = process.env.TELNYX_API_KEY;
+  if (!apiKey) {
+    console.error(`[warm/consult] missing TELNYX_API_KEY — cannot bridge`);
+    return false;
+  }
+
+  console.log(
+    `[warm/consult] target answered targetConsultCcid=${targetConsultCcid} — bridging to repConsultCcid=${decoded.parent_rep_consult_ccid}`
+  );
+  const res = await fetch(
+    `https://api.telnyx.com/v2/calls/${decoded.parent_rep_consult_ccid}/actions/bridge`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ call_control_id: targetConsultCcid }),
+    }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail =
+      data?.errors?.[0]?.detail || data?.errors?.[0]?.title || "unknown";
+    console.error(
+      `[warm/consult] bridge FAILED ${res.status} repConsultCcid=${decoded.parent_rep_consult_ccid} targetConsultCcid=${targetConsultCcid}: ${detail}`
+    );
+    // Hangup both legs to avoid orphan state.
+    await fetch(
+      `https://api.telnyx.com/v2/calls/${decoded.parent_rep_consult_ccid}/actions/hangup`,
+      { method: "POST", headers: { Authorization: `Bearer ${apiKey}` } }
+    ).catch(() => {});
+    await fetch(
+      `https://api.telnyx.com/v2/calls/${targetConsultCcid}/actions/hangup`,
+      { method: "POST", headers: { Authorization: `Bearer ${apiKey}` } }
+    ).catch(() => {});
+    return false;
+  }
+  console.log(
+    `[warm/consult] bridge ok repConsultCcid=${decoded.parent_rep_consult_ccid} targetConsultCcid=${targetConsultCcid}`
+  );
+  return true;
+}
+
 // Dispatch ring-group fan-out: look up the group for the dialed number,
 // find available members, broadcast via Supabase Realtime, ring their
 // browsers via Call Control, and schedule a timeout hangup if nobody
@@ -1132,11 +1325,22 @@ export async function POST(req: NextRequest) {
 
       // Outbound-dial phase 2 (rep answered): originate customer leg.
       // Outbound-dial phase 3 (customer answered): bridge to rep leg.
-      // The two run on different ccids — gated by client_state.type.
+      // Warm-consult phase 2 (rep_consult answered): originate target leg.
+      // Warm-consult phase 3 (target_consult answered): bridge to rep_consult.
+      // All four run on different ccids — gated by client_state.type so
+      // only the matching one acts.
       if (eventType === "call.answered" && ccid) {
         const cs = payload?.client_state as string | undefined;
         await maybeDialOutboundCustomerLeg({ repCcid: ccid, clientStateB64: cs });
         await maybeBridgeOutboundLegs({ customerCcid: ccid, clientStateB64: cs });
+        await maybeDialConsultTargetLeg({
+          repConsultCcid: ccid,
+          clientStateB64: cs,
+        });
+        await maybeBridgeConsultLegs({
+          targetConsultCcid: ccid,
+          clientStateB64: cs,
+        });
       }
 
       if (apiKey && ccid) {
