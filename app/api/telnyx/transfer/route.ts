@@ -112,7 +112,7 @@ async function blindTransfer(args: {
   const { data: logRow } = await admin
     .from("call_logs")
     .select(
-      "id, direction, call_control_id, external_ccid, phone_number, from_number"
+      "id, direction, call_control_id, external_ccid, phone_number, from_number, created_at"
     )
     .eq("call_control_id", callControlId)
     .order("created_at", { ascending: false })
@@ -121,6 +121,10 @@ async function blindTransfer(args: {
 
   const externalCcid = (logRow?.external_ccid as string | null) || null;
   const direction = (logRow?.direction as string | null) || null;
+
+  console.log(
+    `[transfer/blind] lookup repCcid=${callControlId} → row=${logRow?.id ?? "(none)"} direction=${direction ?? "?"} external_ccid=${externalCcid ?? "(missing)"} created_at=${logRow?.created_at ?? "?"}`
+  );
 
   const normalizedTo = to.startsWith("+") ? to : `+${to}`;
   const storedFrom = logRow?.from_number as string | null | undefined;

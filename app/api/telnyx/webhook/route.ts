@@ -140,16 +140,29 @@ async function fanOutToAgents({
 }
 
 // Phase 2 of the rep-first outbound architecture (see
-// app/api/telnyx/dial-outbound/route.ts for context). When the rep leg
-// answers, originate the customer leg with link_to=repCcid +
-// bridge_on_answer=true. By now the rep leg is ACTIVE, so a customer-
-// side failure (PSTN busy, bad number, rate limit) stays scoped to the
-// customer leg — link_to no longer leaks the cause back to the rep.
+// app/api/telnyx/dial-outbound/route.ts for context).
 //
-// Returns true if it acted (so caller knows to skip the rest of the
-// answered-handler? No — we still want recording / status updates to
-// run on the rep leg as normal. Caller proceeds either way; the return
-// is only for logging.)
+// PREVIOUS APPROACH (link_to + bridge_on_answer) — TURNED OUT BROKEN:
+// originating the customer leg with `link_to=repCcid + bridge_on_answer`
+// auto-bridges them on customer answer, BUT the originated child leg
+// becomes non-addressable for /actions/transfer once the bridge
+// completes. Stephen confirmed: "This call is no longer active and
+// can't receive commands" on blind, and warm dropped the consult party
+// because the same /actions/transfer-on-customer-leg call returned the
+// same error after the consult hangup.
+//
+// Inbound transfer works because there `external_ccid` points at the
+// PARENT (the inbound PSTN leg, used as link_to target). For the new
+// outbound architecture `external_ccid` was pointing at the CHILD (the
+// originated customer leg), and Telnyx doesn't accept commands on a
+// child leg whose link_to + bridge_on_answer has already completed.
+//
+// CURRENT APPROACH: originate the customer leg as a STANDALONE leg (no
+// link_to, no bridge_on_answer). Carry parent_rep_ccid in client_state
+// so the customer's call.answered webhook can issue an explicit
+// /actions/bridge to join the two. Both legs stay independently
+// addressable, so /actions/transfer on the customer leg works the same
+// way it does for inbound.
 async function maybeDialOutboundCustomerLeg(args: {
   repCcid: string;
   clientStateB64: string | undefined;
@@ -176,6 +189,24 @@ async function maybeDialOutboundCustomerLeg(args: {
     return false;
   }
 
+  // Idempotency guard: webhook may double-fire on retries / call.bridged
+  // post-answered. external_ccid stamped means we already kicked off the
+  // customer originate — bail.
+  const adminGuard = getAdmin();
+  const { data: existing } = await adminGuard
+    .from("call_logs")
+    .select("external_ccid")
+    .eq("call_control_id", repCcid)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (existing?.external_ccid) {
+    console.log(
+      `[dial/outbound] idempotent skip — external_ccid=${existing.external_ccid} already on repCcid=${repCcid}`
+    );
+    return false;
+  }
+
   const apiKey = process.env.TELNYX_API_KEY;
   const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
   if (!apiKey || !callControlAppId) {
@@ -184,6 +215,18 @@ async function maybeDialOutboundCustomerLeg(args: {
     );
     return false;
   }
+
+  // Customer leg's client_state carries parent_rep_ccid so the customer-
+  // side call.answered webhook can issue /actions/bridge.
+  const customerClientState = Buffer.from(
+    JSON.stringify({
+      type: "outbound_dial_customer",
+      parent_rep_ccid: repCcid,
+      customer: decoded.customer,
+      from: decoded.from,
+      user_id: decoded.user_id,
+    })
+  ).toString("base64");
 
   console.log(
     `[dial/outbound] rep answered repCcid=${repCcid} — originating customer=${decoded.customer} from=${decoded.from}`
@@ -198,11 +241,8 @@ async function maybeDialOutboundCustomerLeg(args: {
       connection_id: callControlAppId,
       to: decoded.customer,
       from: decoded.from,
-      link_to: repCcid,
-      bridge_on_answer: true,
-      bridge_intent: true,
       timeout_secs: 30,
-      record: "record-from-answer",
+      client_state: customerClientState,
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -229,7 +269,9 @@ async function maybeDialOutboundCustomerLeg(args: {
   );
 
   // Stamp external_ccid on the rep's pre-existing call_logs row so
-  // transfer can target the customer leg deterministically.
+  // transfer can target the customer leg deterministically. Stamp at
+  // originate-time (not bridge-time) so the row is ready before the
+  // rep can possibly click transfer.
   if (customerCcid) {
     try {
       const admin = getAdmin();
@@ -248,6 +290,82 @@ async function maybeDialOutboundCustomerLeg(args: {
       );
     }
   }
+  return true;
+}
+
+// Phase 3 of the rep-first outbound architecture: customer leg has
+// answered. Issue /actions/bridge to join customer leg to rep leg. We
+// can't use link_to + bridge_on_answer because it leaves the child leg
+// non-addressable for /actions/transfer (see above).
+async function maybeBridgeOutboundLegs(args: {
+  customerCcid: string;
+  clientStateB64: string | undefined;
+}): Promise<boolean> {
+  const { customerCcid, clientStateB64 } = args;
+  if (!clientStateB64) return false;
+
+  let decoded: {
+    type?: string;
+    parent_rep_ccid?: string;
+  } | null = null;
+  try {
+    decoded = JSON.parse(Buffer.from(clientStateB64, "base64").toString("utf8"));
+  } catch {
+    return false;
+  }
+  if (!decoded || decoded.type !== "outbound_dial_customer") return false;
+  if (!decoded.parent_rep_ccid) {
+    console.warn(
+      `[dial/outbound] bridge trigger missing parent_rep_ccid on customerCcid=${customerCcid}`
+    );
+    return false;
+  }
+
+  const apiKey = process.env.TELNYX_API_KEY;
+  if (!apiKey) {
+    console.error(
+      `[dial/outbound] missing TELNYX_API_KEY — cannot bridge legs`
+    );
+    return false;
+  }
+
+  console.log(
+    `[dial/outbound] customer answered customerCcid=${customerCcid} — bridging to repCcid=${decoded.parent_rep_ccid}`
+  );
+  const res = await fetch(
+    `https://api.telnyx.com/v2/calls/${decoded.parent_rep_ccid}/actions/bridge`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ call_control_id: customerCcid }),
+    }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail =
+      data?.errors?.[0]?.detail || data?.errors?.[0]?.title || "unknown";
+    console.error(
+      `[dial/outbound] bridge FAILED ${res.status} repCcid=${decoded.parent_rep_ccid} customerCcid=${customerCcid}: ${detail}`
+    );
+    // Bridge failed but both legs are alive — hang up both rather than
+    // leaving an awkward "rep talking to a real customer with no audio
+    // path" state.
+    await fetch(
+      `https://api.telnyx.com/v2/calls/${decoded.parent_rep_ccid}/actions/hangup`,
+      { method: "POST", headers: { Authorization: `Bearer ${apiKey}` } }
+    ).catch(() => {});
+    await fetch(
+      `https://api.telnyx.com/v2/calls/${customerCcid}/actions/hangup`,
+      { method: "POST", headers: { Authorization: `Bearer ${apiKey}` } }
+    ).catch(() => {});
+    return false;
+  }
+  console.log(
+    `[dial/outbound] bridge ok repCcid=${decoded.parent_rep_ccid} customerCcid=${customerCcid}`
+  );
   return true;
 }
 
@@ -1012,14 +1130,13 @@ export async function POST(req: NextRequest) {
       });
       if (vmHandled) break;
 
-      // Outbound-dial phase 2: rep just auto-answered the server-
-      // originated leg. Now originate the customer leg and bridge them.
-      // See dial-outbound/route.ts and maybeDialOutboundCustomerLeg.
+      // Outbound-dial phase 2 (rep answered): originate customer leg.
+      // Outbound-dial phase 3 (customer answered): bridge to rep leg.
+      // The two run on different ccids — gated by client_state.type.
       if (eventType === "call.answered" && ccid) {
-        await maybeDialOutboundCustomerLeg({
-          repCcid: ccid,
-          clientStateB64: payload?.client_state as string | undefined,
-        });
+        const cs = payload?.client_state as string | undefined;
+        await maybeDialOutboundCustomerLeg({ repCcid: ccid, clientStateB64: cs });
+        await maybeBridgeOutboundLegs({ customerCcid: ccid, clientStateB64: cs });
       }
 
       if (apiKey && ccid) {
