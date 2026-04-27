@@ -284,37 +284,60 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
               // of an outbound dial the rep just initiated. Auto-answer
               // silently and tag the call as outbound for the active-
               // call UI flow downstream.
-              try {
-                const cs = call.options?.clientState;
-                if (cs) {
-                  const decoded = JSON.parse(atob(cs)) as {
-                    type?: string;
-                    to?: string;
-                  };
-                  if (decoded?.type === "outbound_dial") {
-                    console.log(
-                      "[Telnyx] outbound_dial auto-answer to=",
-                      decoded.to
-                    );
-                    // Mark as outbound so the active-call UI shows the
-                    // dialed number, not the SIP credential.
-                    try {
-                      (call as unknown as { direction?: string }).direction =
-                        "outbound";
-                      (
-                        call.options as unknown as {
-                          destinationNumber?: string;
-                          callerNumber?: string;
-                        }
-                      ).destinationNumber = decoded.to;
-                    } catch {}
-                    call.answer();
-                    return;
+              const tryAutoAnswerOutboundDial = (): boolean => {
+                // Diagnostic: dump everything the SDK gives us so we
+                // can see how Telnyx is actually delivering the marker.
+                const opts = (call.options || {}) as Record<string, unknown>;
+                const cs = (opts.clientState ||
+                  (opts as { client_state?: string }).client_state ||
+                  "") as string;
+                const cause = (call as unknown as { cause?: string }).cause;
+                console.log("[Telnyx] inbound ringing diagnostics:", {
+                  clientStateRaw: cs ? cs.slice(0, 120) : "(none)",
+                  clientStateLen: cs ? cs.length : 0,
+                  callerNumber: opts.callerNumber,
+                  destinationNumber: opts.destinationNumber,
+                  remoteCallerName: (call as unknown as { remoteCallerName?: string })
+                    .remoteCallerName,
+                  cause,
+                });
+                if (!cs) return false;
+                // Try base64 decode first, fall back to raw JSON.
+                let decoded: { type?: string; to?: string } | null = null;
+                try {
+                  decoded = JSON.parse(atob(cs));
+                } catch {
+                  try {
+                    decoded = JSON.parse(cs);
+                  } catch {
+                    /* not JSON either */
                   }
                 }
-              } catch (err) {
-                console.warn("[Telnyx] client_state parse failed:", err);
-              }
+                console.log("[Telnyx] decoded client_state:", decoded);
+                if (decoded?.type !== "outbound_dial") return false;
+                console.log(
+                  "[Telnyx] outbound_dial auto-answer to=",
+                  decoded.to
+                );
+                try {
+                  (call as unknown as { direction?: string }).direction =
+                    "outbound";
+                  (
+                    call.options as unknown as {
+                      destinationNumber?: string;
+                      callerNumber?: string;
+                    }
+                  ).destinationNumber = decoded.to;
+                } catch {}
+                try {
+                  call.answer();
+                  return true;
+                } catch (err) {
+                  console.error("[Telnyx] auto-answer threw:", err);
+                  return false;
+                }
+              };
+              if (tryAutoAnswerOutboundDial()) return;
 
               // Defense-in-depth auto-reject. With per-user SIP
               // credentials the server-side dispatchRingGroup already
