@@ -132,60 +132,30 @@ async function blindTransfer(args: {
     fromNumber = envFrom.startsWith("+") ? envFrom : `+${envFrom}`;
   }
 
-  // OUTBOUND path: link_to + bridge_on_answer.
-  if (direction === "outbound") {
-    const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
-    if (!callControlAppId) {
-      return NextResponse.json(
-        { error: "TELNYX_CALL_CONTROL_APP_ID not configured" },
-        { status: 500 }
-      );
-    }
-    const bodySent: Record<string, unknown> = {
-      to: normalizedTo,
-      from: fromNumber || normalizedTo,
-      connection_id: callControlAppId,
-      link_to: callControlId,
-      bridge_on_answer: true,
-      bridge_intent: true,
-      timeout_secs: 30,
-    };
-    console.log(
-      `[transfer/blind/out] request originating new leg link_to=${callControlId} to=${normalizedTo} from=${fromNumber ?? "(none)"}`
-    );
-    const res = await fetch(`${TELNYX_API}/calls`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(bodySent),
-    });
-    const data = await res.json().catch(() => ({}));
-    console.log(
-      `[transfer/blind/out] response status=${res.status} body=${JSON.stringify(data).slice(0, 600)}`
-    );
-    if (!res.ok) {
-      const detail =
-        data?.errors?.[0]?.detail ||
-        data?.errors?.[0]?.title ||
-        "Outbound transfer (link_to) failed";
-      return NextResponse.json({ error: detail }, { status: res.status });
-    }
-    return NextResponse.json({
-      success: true,
-      mode: "outbound_link_to",
-      new_leg_ccid: data?.data?.call_control_id,
-    });
-  }
+  // Single primitive for both directions: /actions/transfer on the
+  // external (customer) leg. Symmetry comes from the new outbound
+  // architecture (see app/api/telnyx/dial-outbound/route.ts):
+  //
+  //   inbound:  external_ccid = customer's PSTN inbound leg
+  //   outbound: external_ccid = customer's PSTN outbound leg (originated
+  //             server-side via link_to from the webhook on call.answered)
+  //
+  // In both cases the external leg is OWNED by us (Call Control App)
+  // and its REMOTE party is the customer. /actions/transfer redirects
+  // the remote party to the new destination and tears down the rep's
+  // bridge — exactly the desired semantic.
+  //
+  // Why the previous OUTBOUND path (link_to=repCcid + bridge_on_answer)
+  // was wrong for the new architecture: that bridges the new target
+  // INTO the rep's session, which moves the rep — not the customer —
+  // onto the new leg, and drops the customer when the bridge swap
+  // completes. Stephen saw exactly this: "customer dropped, third party
+  // rang on Pepper." Killed.
 
-  // INBOUND path (and fallback when direction is unknown):
-  // /actions/transfer on the external_ccid (or repCcid as last-ditch
-  // fallback for legacy rows without a stamped external).
   const targetCcid = externalCcid || callControlId;
   if (!externalCcid) {
     console.log(
-      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} (direction=${direction ?? "?"}) — transferring rep's leg (may fail)`
+      `[transfer/fallback] no external_ccid captured for ccid=${callControlId} (direction=${direction ?? "?"}) — transferring rep's leg (will likely move the rep, not the customer; investigate webhook stamping)`
     );
   }
 
@@ -194,8 +164,9 @@ async function blindTransfer(args: {
 
   const endpoint = `${TELNYX_API}/calls/${targetCcid}/actions/transfer`;
 
+  const tag = direction === "outbound" ? "out" : "in";
   console.log(
-    `[transfer/blind/in] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${normalizedTo} bodySent=${JSON.stringify(
+    `[transfer/blind/${tag}] request targetCcid=${targetCcid} externalCcid=${externalCcid ?? "(missing)"} repCcid=${callControlId} to=${normalizedTo} bodySent=${JSON.stringify(
       bodySent
     )}`
   );
@@ -211,7 +182,7 @@ async function blindTransfer(args: {
   const data = await res.json().catch(() => ({}));
 
   console.log(
-    `[transfer/blind/in] response status=${res.status} responseBody=${JSON.stringify(
+    `[transfer/blind/${tag}] response status=${res.status} responseBody=${JSON.stringify(
       data
     )}`
   );
@@ -222,13 +193,13 @@ async function blindTransfer(args: {
       data?.errors?.[0]?.title ||
       "Blind transfer failed";
     console.log(
-      `[transfer/blind/in] FAILED ${res.status} targetCcid=${targetCcid} to=${normalizedTo}: ${detail}`
+      `[transfer/blind/${tag}] FAILED ${res.status} targetCcid=${targetCcid} to=${normalizedTo}: ${detail}`
     );
     return NextResponse.json({ error: detail }, { status: res.status });
   }
 
   console.log(
-    `[transfer/blind/in] ok targetCcid=${targetCcid} to=${normalizedTo} — waiting for hangup of rep's leg`
+    `[transfer/blind/${tag}] ok targetCcid=${targetCcid} to=${normalizedTo} — waiting for hangup of rep's leg`
   );
 
   return NextResponse.json({
