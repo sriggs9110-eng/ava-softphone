@@ -260,18 +260,72 @@ export default function Home() {
   // Create call log in Supabase when making/receiving a call
   const handleMakeCall = useCallback(
     async (number: string) => {
-      // makeCall returns the callControlId immediately from the SDK
-      const ccid = await makeCall(number);
-      if (user) {
-        const log = await insertCallLog({
-          user_id: user.id,
-          direction: "outbound",
-          phone_number: number,
-          status: "initiated",
-          call_control_id: ccid,
+      // Server-originated outbound (default). Two-leg architecture so
+      // that /actions/transfer can address the customer's PSTN leg
+      // independently — fixes the long-running outbound transfer bug
+      // where transfer kept the rep and dropped the customer. The
+      // server inserts the call_logs row with external_ccid stamped
+      // at originate time. The rep's SDK auto-answers the resulting
+      // inbound INVITE via client_state matching (see useTelnyxClient).
+      //
+      // Set ?legacy_dial=1 to fall back to direct SDK.newCall for
+      // emergency rollback without redeploying.
+      const useLegacy =
+        typeof window !== "undefined" &&
+        new URL(window.location.href).searchParams.get("legacy_dial") === "1";
+
+      if (useLegacy) {
+        const ccid = await makeCall(number);
+        if (user) {
+          const log = await insertCallLog({
+            user_id: user.id,
+            direction: "outbound",
+            phone_number: number,
+            status: "initiated",
+            call_control_id: ccid,
+          });
+          if (log) activeCallLogIdRef.current = log.id;
+          console.log(
+            "[Call] (legacy SDK) outbound log, ccid:",
+            ccid,
+            "logId:",
+            log?.id
+          );
+        }
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/telnyx/dial-outbound", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to: number }),
         });
-        if (log) activeCallLogIdRef.current = log.id;
-        console.log("[Call] Created outbound log, ccid:", ccid, "logId:", log?.id);
+        const data = (await res.json().catch(() => ({}))) as {
+          success?: boolean;
+          repCcid?: string;
+          customerCcid?: string;
+          error?: string;
+        };
+        if (!res.ok || !data?.success) {
+          console.error(
+            "[Call] dial-outbound failed:",
+            res.status,
+            data?.error || "(no detail)"
+          );
+          return;
+        }
+        console.log(
+          "[Call] outbound originated repCcid=",
+          data.repCcid,
+          "customerCcid=",
+          data.customerCcid
+        );
+        // The server inserts call_logs at originate time, so we don't
+        // need a client-side insertCallLog here. The rep's SDK will
+        // auto-answer the inbound INVITE that lands shortly.
+      } catch (err) {
+        console.error("[Call] dial-outbound threw:", err);
       }
     },
     [makeCall, user]

@@ -275,6 +275,47 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
+              // Outbound-dial auto-answer. The /api/telnyx/dial-outbound
+              // endpoint originates two legs server-side (customer +
+              // rep) and INVITEs the rep's SIP endpoint with a
+              // base64-encoded client_state marker {type: "outbound_dial"}.
+              // From Telnyx's perspective this is an "inbound" call to
+              // the rep's credential, but it's actually the second leg
+              // of an outbound dial the rep just initiated. Auto-answer
+              // silently and tag the call as outbound for the active-
+              // call UI flow downstream.
+              try {
+                const cs = call.options?.clientState;
+                if (cs) {
+                  const decoded = JSON.parse(atob(cs)) as {
+                    type?: string;
+                    to?: string;
+                  };
+                  if (decoded?.type === "outbound_dial") {
+                    console.log(
+                      "[Telnyx] outbound_dial auto-answer to=",
+                      decoded.to
+                    );
+                    // Mark as outbound so the active-call UI shows the
+                    // dialed number, not the SIP credential.
+                    try {
+                      (call as unknown as { direction?: string }).direction =
+                        "outbound";
+                      (
+                        call.options as unknown as {
+                          destinationNumber?: string;
+                          callerNumber?: string;
+                        }
+                      ).destinationNumber = decoded.to;
+                    } catch {}
+                    call.answer();
+                    return;
+                  }
+                }
+              } catch (err) {
+                console.warn("[Telnyx] client_state parse failed:", err);
+              }
+
               // Defense-in-depth auto-reject. With per-user SIP
               // credentials the server-side dispatchRingGroup already
               // filters out unavailable members before inviting — so in
