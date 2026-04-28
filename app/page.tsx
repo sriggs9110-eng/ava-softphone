@@ -118,6 +118,7 @@ export default function Home() {
     packetLoss,
     audioRef,
     makeCall,
+    ensurePriorCallDestroyed,
     answerCall,
     rejectCall,
     hangup,
@@ -257,20 +258,28 @@ export default function Home() {
     [changeAgentStatus, updateStatus]
   );
 
-  // Create call log in Supabase when making/receiving a call
+  // Create call log in Supabase when making/receiving a call.
+  //
+  // Phase 1B (sandbox/two-leg-outbound-custom-headers):
+  //   - ?new_dial=1 → server-originated two-leg via /api/telnyx/dial-outbound.
+  //     Server returns repCcid + customerCcid; the rep's SDK receives a
+  //     credential-targeted INVITE marked with custom_headers
+  //     [{X-Pepper-Auto-Answer: 1}] and auto-answers (see useTelnyxClient
+  //     callUpdate handler).
+  //   - default       → legacy SDK.newCall single-leg path (still broken
+  //     for outbound transfer; kept as the working dial-and-talk path).
+  //
+  // Both paths now run ensurePriorCallDestroyed() first so the prior
+  // SDK call is fully torn down before a new one can be invited —
+  // mitigates the post-call USER_BUSY pattern documented in
+  // PHASE_1A_REPORT.md.
   const handleMakeCall = useCallback(
     async (number: string) => {
-      // ROLLBACK 2026-04-27: defaulting back to SDK.newCall for normal
-      // outbound calls. The two-leg architecture (POST /api/telnyx/
-      // dial-outbound) hit USER_BUSY when Telnyx INVITEs the rep's own
-      // SIP credential — the credential's registration or concurrency
-      // setting flags it as busy, so the auto-answer code never gets
-      // to run. Outbound transfer is still broken on the legacy path
-      // but at least dialing works. Set ?new_dial=1 to opt into the
-      // experimental two-leg path for testing.
       const useNew =
         typeof window !== "undefined" &&
         new URL(window.location.href).searchParams.get("new_dial") === "1";
+
+      console.log(`[makeCall] path=${useNew ? "new" : "sdk"} number=${number}`);
 
       if (!useNew) {
         const ccid = await makeCall(number);
@@ -291,6 +300,16 @@ export default function Home() {
           );
         }
         return;
+      }
+
+      // Run hygiene before the server originates Leg B. The
+      // server's POST /v2/calls to=sip:gencred@sip.telnyx.com lands
+      // as an INVITE on the rep's WebRTC SDK; if a prior SDK call
+      // hasn't fully destroyed, the SIP UA may 486 BUSY it.
+      try {
+        await ensurePriorCallDestroyed();
+      } catch (err) {
+        console.warn("[makeCall] hygiene threw, proceeding anyway:", err);
       }
 
       try {
@@ -326,7 +345,7 @@ export default function Home() {
         console.error("[Call] dial-outbound threw:", err);
       }
     },
-    [makeCall, user]
+    [makeCall, ensurePriorCallDestroyed, user]
   );
 
   const handleAnswerCall = useCallback(async () => {

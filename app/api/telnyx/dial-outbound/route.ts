@@ -17,19 +17,32 @@ import { getLocalNumber } from "@/app/lib/local-presence";
 //
 // Flow:
 //   1. POST /v2/calls to=customer_number, from=business_number
-//      → Leg A (ccid_A) = the customer's PSTN leg
-//   2. POST /v2/calls to=sip:rep_sip_username, link_to=ccid_A,
-//      bridge_on_answer=true
-//      → Leg B (ccid_B) = the rep's WebRTC leg
-//   3. Rep's SDK auto-answers Leg B (detected via client_state).
-//   4. Telnyx auto-bridges A + B on answer.
+//      → Leg A (customerCcid) = the customer's PSTN leg
+//   2. POST /v2/calls to=sip:rep_sip_username, link_to=customerCcid,
+//      bridge_on_answer=true, custom_headers=[{X-Pepper-Auto-Answer: 1}]
+//      → Leg B (repCcid) = the rep's WebRTC leg
+//   3. Rep's SDK auto-answers Leg B by reading the custom header
+//      (call.options.customHeaders, set by Telnyx from custom_headers
+//      on the originate). Verified via @telnyx/webrtc SDK source —
+//      `d.dialogParams.custom_headers → l.customHeaders`. The prior
+//      attempt (commit 638e517) used `client_state` instead and
+//      Stephen's diagnostic showed `clientStateRaw: '(none)'` — the
+//      verto invite for credential-targeted calls didn't propagate
+//      client_state. custom_headers is the working channel.
+//   4. Telnyx auto-bridges Leg A + Leg B on answer.
 //
 // Body: { to: string, from?: string }
 // Returns: { success, customerCcid, repCcid }
 //
-// Logged with [dial/outbound] prefix.
+// Logged with [dial-outbound/*] prefixes per task spec.
 
 const TELNYX_API = "https://api.telnyx.com/v2";
+
+// Marker header read by the SDK auto-answer handler in
+// useTelnyxClient.ts to distinguish the rep-side leg of a
+// server-originated outbound from a real inbound INVITE.
+const AUTO_ANSWER_HEADER_NAME = "X-Pepper-Auto-Answer";
+const AUTO_ANSWER_HEADER_VALUE = "1";
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
@@ -89,9 +102,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const startedAt = Date.now();
+
   // Step 1: originate Leg A to the customer.
   console.log(
-    `[dial/outbound] step 1: dial customer to=${normalizedTo} from=${fromNumber}`
+    `[dial-outbound/legA-create] customer_to=${normalizedTo} from=${fromNumber} user_id=${user.id}`
   );
   const legAResp = await fetch(`${TELNYX_API}/calls`, {
     method: "POST",
@@ -112,37 +127,39 @@ export async function POST(req: NextRequest) {
       legA?.errors?.[0]?.detail ||
       legA?.errors?.[0]?.title ||
       "Customer dial failed";
-    console.error(`[dial/outbound] Leg A FAILED ${legAResp.status}: ${detail}`);
+    console.error(
+      `[dial-outbound/error] leg=A status=${legAResp.status} detail=${detail} body=${JSON.stringify(legA).slice(0, 600)}`
+    );
     return NextResponse.json({ error: detail }, { status: legAResp.status });
   }
   const customerCcid = legA?.data?.call_control_id as string | undefined;
   const customerSession = legA?.data?.call_session_id as string | undefined;
   if (!customerCcid) {
-    console.error(`[dial/outbound] Leg A response missing ccid: ${JSON.stringify(legA).slice(0, 400)}`);
+    console.error(
+      `[dial-outbound/error] leg=A no_ccid_in_response body=${JSON.stringify(legA).slice(0, 600)}`
+    );
     return NextResponse.json(
       { error: "Telnyx returned no ccid for customer leg" },
       { status: 500 }
     );
   }
   console.log(
-    `[dial/outbound] Leg A ok customerCcid=${customerCcid} session=${customerSession}`
+    `[dial-outbound/legA-create] ok customer_ccid=${customerCcid} customer_session=${customerSession}`
   );
 
   // Step 2: originate Leg B to the rep's SIP credential, linked to
   // Leg A. Telnyx auto-bridges when Leg B answers.
+  //
+  // Auto-answer marker: custom_headers=[{X-Pepper-Auto-Answer: 1}].
+  // Verified via @telnyx/webrtc SDK source (bundle.js):
+  //   d.dialogParams.custom_headers → l.customHeaders
+  // The Call object's options.customHeaders surfaces these on the
+  // SDK side. Replaces the prior client_state mechanism (commit
+  // 638e517), which Stephen's diagnostic showed wasn't propagated
+  // through the credential-INVITE hop (`clientStateRaw: '(none)'`).
   const sipUri = `sip:${sipUsername}@sip.telnyx.com`;
-  // client_state encodes "outbound_dial" so the rep's SDK auto-answers
-  // without showing inbound-call UI. Base64-encoded JSON.
-  const clientState = Buffer.from(
-    JSON.stringify({
-      type: "outbound_dial",
-      to: normalizedTo,
-      from: fromNumber,
-      user_id: user.id,
-    })
-  ).toString("base64");
   console.log(
-    `[dial/outbound] step 2: dial rep sip=${sipUri} link_to=${customerCcid}`
+    `[dial-outbound/legB-create] rep_to_sip=${sipUri} link_to=${customerCcid} from=${fromNumber}`
   );
   const legBResp = await fetch(`${TELNYX_API}/calls`, {
     method: "POST",
@@ -158,7 +175,9 @@ export async function POST(req: NextRequest) {
       bridge_on_answer: true,
       bridge_intent: true,
       timeout_secs: 30,
-      client_state: clientState,
+      custom_headers: [
+        { name: AUTO_ANSWER_HEADER_NAME, value: AUTO_ANSWER_HEADER_VALUE },
+      ],
     }),
   });
   const legB = await legBResp.json().catch(() => ({}));
@@ -167,7 +186,9 @@ export async function POST(req: NextRequest) {
       legB?.errors?.[0]?.detail ||
       legB?.errors?.[0]?.title ||
       "Rep dial failed";
-    console.error(`[dial/outbound] Leg B FAILED ${legBResp.status}: ${detail}`);
+    console.error(
+      `[dial-outbound/error] leg=B status=${legBResp.status} detail=${detail} body=${JSON.stringify(legB).slice(0, 600)}`
+    );
     // Hangup the customer leg we just originated so we don't leave a
     // ringing zombie.
     fetch(`${TELNYX_API}/calls/${customerCcid}/actions/hangup`, {
@@ -179,12 +200,13 @@ export async function POST(req: NextRequest) {
   const repCcid = legB?.data?.call_control_id as string | undefined;
   const repSession = legB?.data?.call_session_id as string | undefined;
   console.log(
-    `[dial/outbound] Leg B ok repCcid=${repCcid} session=${repSession}`
+    `[dial-outbound/legB-create] ok rep_ccid=${repCcid} rep_session=${repSession}`
   );
 
   // Stamp the call_logs row at pairing time. external_ccid points at
   // the customer's leg — exactly what /actions/transfer needs to drop
   // the rep and redirect the customer to a new destination.
+  let rowId: string | null = null;
   if (repCcid) {
     const { data: logRow, error: logErr } = await admin
       .from("call_logs")
@@ -202,15 +224,19 @@ export async function POST(req: NextRequest) {
       .single();
     if (logErr) {
       console.error(
-        `[dial/outbound] call_logs insert failed:`,
-        logErr.message
+        `[dial-outbound/error] row-insert failed: ${logErr.message}`
       );
     } else {
+      rowId = logRow?.id ?? null;
       console.log(
-        `[bridge/pair] outbound stamped external_ccid=${customerCcid} on row=${logRow?.id} repCcid=${repCcid} session=${repSession ?? customerSession ?? "?"}`
+        `[dial-outbound/row-insert] ok row=${rowId} rep_ccid=${repCcid} external_ccid=${customerCcid} session=${repSession ?? customerSession ?? "?"}`
       );
     }
   }
+
+  console.log(
+    `[dial-outbound/summary] customer_ccid=${customerCcid} rep_ccid=${repCcid ?? "?"} legA_status=${legAResp.status} legB_status=${legBResp.status} duration_ms=${Date.now() - startedAt} row_id=${rowId ?? "(none)"}`
+  );
 
   return NextResponse.json({
     success: true,

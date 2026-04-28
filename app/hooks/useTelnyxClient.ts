@@ -262,6 +262,20 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
 
         console.log("[Telnyx]", notification.type, call.state, call.direction, call.cause);
 
+        // [VERBOSE] Task 5: per-state-transition logging so we can
+        // verify in production logs that the SDK's lifecycle reaches
+        // "destroy" (which the hygiene wait-for relies on). Tag with
+        // [VERBOSE] so it's grep-removable later.
+        if (notification.type === "callUpdate") {
+          const ccid =
+            (call as unknown as { telnyxIDs?: { telnyxCallControlId?: string } })
+              .telnyxIDs?.telnyxCallControlId || "?";
+          const prev = (call as unknown as { prevState?: string }).prevState;
+          console.log(
+            `[VERBOSE][sdk/state] ts=${Date.now()} ccid=${ccid} ${prev ?? "?"} → ${call.state}`
+          );
+        }
+
         // Always try to attach remote audio on any update
         if (call.remoteStream && audioRef.current) {
           if (audioRef.current.srcObject !== call.remoteStream) {
@@ -275,65 +289,78 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
             const state = call.state;
 
             if (state === "ringing" && call.direction === "inbound") {
-              // Outbound-dial auto-answer. The /api/telnyx/dial-outbound
-              // endpoint originates two legs server-side (customer +
-              // rep) and INVITEs the rep's SIP endpoint with a
-              // base64-encoded client_state marker {type: "outbound_dial"}.
-              // From Telnyx's perspective this is an "inbound" call to
-              // the rep's credential, but it's actually the second leg
-              // of an outbound dial the rep just initiated. Auto-answer
-              // silently and tag the call as outbound for the active-
-              // call UI flow downstream.
+              // Outbound-dial auto-answer (Task 2 / Phase 1B).
+              //
+              // /api/telnyx/dial-outbound originates two legs
+              // server-side and INVITEs the rep's SIP credential with
+              // custom_headers=[{X-Pepper-Auto-Answer: 1}]. From
+              // Telnyx's perspective the leg arriving at the SDK is
+              // "inbound" to the credential, but it's actually the
+              // rep-side of a server-originated outbound dial. The
+              // marker on call.options.customHeaders distinguishes
+              // it from a real inbound INVITE.
+              //
+              // Property name confirmed via SDK source:
+              //   node_modules/@telnyx/webrtc/lib/packages/js/src/
+              //     Modules/Verto/webrtc/interfaces.d.ts:58
+              //   customHeaders?: Array<{ name: string; value: string }>;
+              // The bundle.js path that populates it:
+              //   d.dialogParams.custom_headers → l.customHeaders
+              //
+              // Replaces the prior client_state mechanism (commit
+              // 638e517) which never reached the SDK on this hop —
+              // Stephen's diagnostic showed `clientStateRaw: '(none)'`.
               const tryAutoAnswerOutboundDial = (): boolean => {
-                // Diagnostic: dump everything the SDK gives us so we
-                // can see how Telnyx is actually delivering the marker.
-                const opts = (call.options || {}) as Record<string, unknown>;
-                const cs = (opts.clientState ||
-                  (opts as { client_state?: string }).client_state ||
-                  "") as string;
-                const cause = (call as unknown as { cause?: string }).cause;
-                console.log("[Telnyx] inbound ringing diagnostics:", {
-                  clientStateRaw: cs ? cs.slice(0, 120) : "(none)",
-                  clientStateLen: cs ? cs.length : 0,
-                  callerNumber: opts.callerNumber,
-                  destinationNumber: opts.destinationNumber,
-                  remoteCallerName: (call as unknown as { remoteCallerName?: string })
-                    .remoteCallerName,
-                  cause,
-                });
-                if (!cs) return false;
-                // Try base64 decode first, fall back to raw JSON.
-                let decoded: { type?: string; to?: string } | null = null;
-                try {
-                  decoded = JSON.parse(atob(cs));
-                } catch {
-                  try {
-                    decoded = JSON.parse(cs);
-                  } catch {
-                    /* not JSON either */
-                  }
-                }
-                console.log("[Telnyx] decoded client_state:", decoded);
-                if (decoded?.type !== "outbound_dial") return false;
-                console.log(
-                  "[Telnyx] outbound_dial auto-answer to=",
-                  decoded.to
+                const opts = (call.options || {}) as {
+                  customHeaders?: Array<{ name: string; value: string }>;
+                  callerNumber?: string;
+                  destinationNumber?: string;
+                };
+                const headers = opts.customHeaders || [];
+                const marker = headers.find(
+                  (h) =>
+                    typeof h?.name === "string" &&
+                    h.name.toLowerCase() === "x-pepper-auto-answer"
                 );
+                console.log(
+                  "[VERBOSE][sdk/auto-answer] inbound ringing diagnostics:",
+                  {
+                    headerCount: headers.length,
+                    headerNames: headers
+                      .map((h) => h?.name)
+                      .filter(Boolean),
+                    markerPresent: Boolean(marker),
+                    markerValue: marker?.value,
+                    callerNumber: opts.callerNumber,
+                    destinationNumber: opts.destinationNumber,
+                  }
+                );
+                if (!marker || marker.value !== "1") {
+                  console.log(
+                    "[sdk/auto-answer] no marker, treating as inbound"
+                  );
+                  return false;
+                }
+                console.log(
+                  `[sdk/auto-answer] header found, answering ccid=${
+                    (
+                      call as unknown as {
+                        telnyxIDs?: { telnyxCallControlId?: string };
+                      }
+                    ).telnyxIDs?.telnyxCallControlId
+                  }`
+                );
+                // Mark as outbound so the active-call UI shows the
+                // dialed number, not the SIP credential.
                 try {
                   (call as unknown as { direction?: string }).direction =
                     "outbound";
-                  (
-                    call.options as unknown as {
-                      destinationNumber?: string;
-                      callerNumber?: string;
-                    }
-                  ).destinationNumber = decoded.to;
                 } catch {}
                 try {
                   call.answer();
                   return true;
                 } catch (err) {
-                  console.error("[Telnyx] auto-answer threw:", err);
+                  console.error("[sdk/auto-answer] call.answer() threw:", err);
                   return false;
                 }
               };
@@ -515,10 +542,97 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     }
   }, [addToHistory, playRingtone, stopRingtone, agentStatus, startAcw, startQualityMonitor, stopQualityMonitor]);
 
+  // Post-call state hygiene (Task 3 / Phase 1B).
+  //
+  // The prior two-leg outbound attempt (commit 638e517) failed
+  // intermittently with USER_BUSY on the rep-side WebRTC INVITE.
+  // DB analysis showed Session 1 worked but Session 2+ returned
+  // user_busy with hangup_source=unknown — i.e. the rep's WebRTC
+  // dialog state was holding onto the prior call long enough that
+  // a fresh INVITE got 486-rejected. This helper guarantees the
+  // SDK's prior call object has reached terminal "destroy" state
+  // before letting the next dial proceed. Used by both the SDK
+  // path (clientRef.current.newCall) and the server-originated
+  // ?new_dial=1 path (which still relies on the SDK to receive
+  // the rep-leg INVITE).
+  //
+  // 5-second hard timeout: we don't want to permanently block
+  // the rep, but if the hygiene timeout fires that's a signal
+  // the underlying state issue isn't fully resolved. Logged loudly.
+  const ensurePriorCallDestroyed = useCallback(async (): Promise<void> => {
+    const prior = callRef.current;
+    if (!prior) {
+      console.log("[hygiene/proceed] no prior call");
+      return;
+    }
+    const startedAt = Date.now();
+    const priorState = (prior as unknown as { state?: string }).state || "?";
+    console.log(
+      `[hygiene/hangup-prev] state=${priorState} ccid=${
+        (
+          prior as unknown as { telnyxIDs?: { telnyxCallControlId?: string } }
+        ).telnyxIDs?.telnyxCallControlId
+      }`
+    );
+    // Ask the SDK to hang up if it isn't already terminal.
+    if (priorState !== "destroy" && priorState !== "hangup") {
+      try {
+        prior.hangup();
+      } catch (err) {
+        console.warn("[hygiene/hangup-prev] hangup threw:", err);
+      }
+    }
+    console.log("[hygiene/wait-destroy] waiting for state=destroy");
+    await new Promise<void>((resolve) => {
+      const TIMEOUT_MS = 5000;
+      const POLL_MS = 50;
+      const t0 = Date.now();
+      const tick = () => {
+        const cur =
+          (prior as unknown as { state?: string }).state || "?";
+        if (cur === "destroy") {
+          console.log(
+            `[hygiene/destroy-confirmed] elapsed_ms=${Date.now() - t0}`
+          );
+          resolve();
+          return;
+        }
+        if (Date.now() - t0 >= TIMEOUT_MS) {
+          console.warn(
+            `[hygiene/timeout] state=${cur} after ${TIMEOUT_MS}ms — proceeding anyway; underlying state may still be wedged`
+          );
+          resolve();
+          return;
+        }
+        setTimeout(tick, POLL_MS);
+      };
+      tick();
+    });
+    callRef.current = null;
+    // Settle delay — give the SIP UA a moment to fully unregister
+    // / re-register before we ask Telnyx to send a new INVITE.
+    await new Promise<void>((r) => setTimeout(r, 250));
+    console.log(
+      `[hygiene/settle] +250ms; total_hygiene_ms=${Date.now() - startedAt}`
+    );
+    console.log("[hygiene/proceed]");
+  }, []);
+
   const makeCall = useCallback(
     async (number: string): Promise<string | undefined> => {
       if (!clientRef.current || connectionStatus !== "connected") return undefined;
       if (agentStatus === "dnd") return undefined;
+
+      // Task 4: feature flag log — distinguishes SDK direct dial vs
+      // server-originated path. The actual fork is in app/page.tsx
+      // handleMakeCall; this path runs only for ?new_dial!=1 (legacy
+      // SDK dial) and as the "rep-side receiver" for ?new_dial=1.
+      console.log("[makeCall] path=sdk number=", number);
+
+      // Task 3: post-call state hygiene. Ensure any prior SDK call has
+      // reached "destroy" before originating a new one — prevents the
+      // USER_BUSY pattern observed in commit 638e517's failure window.
+      await ensurePriorCallDestroyed();
 
       // Unlock audio element with user gesture (required on production domains)
       if (audioRef.current) {
@@ -915,6 +1029,7 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     packetLoss,
     audioRef,
     makeCall,
+    ensurePriorCallDestroyed,
     answerCall,
     rejectCall,
     hangup,
