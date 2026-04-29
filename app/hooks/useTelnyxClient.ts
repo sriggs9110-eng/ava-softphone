@@ -11,6 +11,7 @@ import {
 import { addCallHistoryEntry, getCallHistory } from "@/app/lib/call-history";
 import { getLocalNumber } from "@/app/lib/local-presence";
 import { QualityLevel } from "@/app/components/ConnectionQuality";
+import { createClient as createBrowserSupabase } from "@/lib/supabase/client";
 
 const ACW_DURATION = 30;
 
@@ -99,6 +100,13 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   const [inboundCall, setInboundCall] = useState<Call | null>(null);
   const [callHistory, setCallHistory] = useState<CallHistoryEntry[]>([]);
   const [micError, setMicError] = useState<string | null>(null);
+  // transferNotice is intentionally separate from micError — micError
+  // is for "your microphone broke" UX; transferNotice is for "your
+  // transfer attempt resolved with this outcome." Conflating them
+  // routes the wrong copy through the wrong icon (red exclamation
+  // mark for an informational handoff failure feels alarmist).
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
+  const clearTransferNotice = useCallback(() => setTransferNotice(null), []);
   const [transferCall, setTransferCall] = useState<ActiveCallInfo | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>("available");
   const [acwCountdown, setAcwCountdown] = useState<number | null>(null);
@@ -111,6 +119,58 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const ringtoneTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qualityIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Supabase Realtime subscription for server-broadcasted transfer
+  // outcomes. The webhook handler emits `blind_xfer_failed` on
+  // user:<userId> when an outbound blind-transfer's new leg hangs up
+  // before the bridge fires (no answer, busy, declined, etc.). We
+  // surface payload.message via setTransferNotice so the UI can show
+  // a banner without conflating it with mic errors. Channel is opened
+  // once on mount and cleaned up on unmount.
+  useEffect(() => {
+    let cancelled = false;
+    let teardown: null | (() => void) = null;
+    (async () => {
+      try {
+        const supabase = createBrowserSupabase();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (cancelled || !user?.id) return;
+        const ch = supabase
+          .channel(`user:${user.id}`, {
+            config: { broadcast: { ack: false, self: false } },
+          })
+          .on(
+            "broadcast",
+            { event: "blind_xfer_failed" },
+            (msg: { payload?: { message?: string } }) => {
+              const m =
+                msg?.payload?.message ||
+                "Transfer destination didn't pick up — call still active.";
+              console.log(
+                "[transfer/blind/out] received blind_xfer_failed:",
+                msg?.payload
+              );
+              setTransferNotice(m);
+            }
+          );
+        await ch.subscribe();
+        teardown = () => {
+          supabase.removeChannel(ch).catch(() => {});
+        };
+      } catch (err) {
+        console.warn(
+          "[transfer/blind/out] Realtime subscribe failed:",
+          (err as Error).message
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (teardown) teardown();
+    };
+  }, []);
 
   useEffect(() => {
     setCallHistory(getCallHistory());
@@ -1021,6 +1081,8 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     inboundCall,
     callHistory,
     micError,
+    transferNotice,
+    clearTransferNotice,
     transferCall,
     agentStatus,
     acwCountdown,

@@ -17,6 +17,7 @@ import TranscriptsPage from "@/app/components/TranscriptsPage";
 import AfterCallWork from "@/app/components/AfterCallWork";
 import KeyboardShortcuts from "@/app/components/KeyboardShortcuts";
 import MicError from "@/app/components/MicError";
+import TransferNotice from "@/app/components/TransferNotice";
 import MissionControl from "@/app/components/home/MissionControl";
 import RecentlyDialed from "@/app/components/home/RecentlyDialed";
 import PostCallCelebration from "@/app/components/home/PostCallCelebration";
@@ -110,6 +111,8 @@ export default function Home() {
     inboundCall,
     callHistory: localCallHistory,
     micError,
+    transferNotice,
+    clearTransferNotice,
     transferCall,
     agentStatus,
     acwCountdown,
@@ -698,6 +701,12 @@ export default function Home() {
       </main>
 
       {micError && <MicError message={micError} />}
+      {transferNotice && (
+        <TransferNotice
+          message={transferNotice}
+          onDismiss={clearTransferNotice}
+        />
+      )}
     </div>
   );
 }

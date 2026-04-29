@@ -1051,6 +1051,77 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      // Blind-transfer outbound bridge (originate-then-bridge).
+      //
+      // /api/telnyx/transfer's outbound branch originates a new leg
+      // with client_state={type:"blind_xfer_bridge", customer_ccid,
+      // rep_ccid}. When that leg answers we /actions/bridge it with
+      // the customer's PSTN leg. Replaces the prior link_to +
+      // bridge_on_answer (which pre-unbridged customer; killed Leg A
+      // before destination ever rang — see PHASE_1A_REPORT.md).
+      //
+      // Edge case: customer leg already dead by the time destination
+      // answered (race). /actions/bridge returns non-2xx; we then
+      // /actions/hangup the orphan new leg so it doesn't talk to
+      // nobody.
+      if (eventType === "call.answered" && ccid && apiKey) {
+        const cs = payload?.client_state as string | undefined;
+        if (cs) {
+          let decoded:
+            | { type?: string; customer_ccid?: string; rep_ccid?: string }
+            | null = null;
+          try {
+            decoded = JSON.parse(
+              Buffer.from(cs, "base64").toString("utf8")
+            );
+          } catch {
+            // not our marker; ignore
+          }
+          if (
+            decoded?.type === "blind_xfer_bridge" &&
+            decoded.customer_ccid
+          ) {
+            const customerCcid = decoded.customer_ccid;
+            console.log(
+              `[transfer/blind/out] new leg answered ccid=${ccid} → bridging customer_ccid=${customerCcid}`
+            );
+            const bridgeRes = await fetch(
+              `https://api.telnyx.com/v2/calls/${customerCcid}/actions/bridge`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${apiKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ call_control_id: ccid }),
+              }
+            );
+            const bridgeBody = await bridgeRes.json().catch(() => ({}));
+            console.log(
+              `[transfer/blind/out] bridge status=${bridgeRes.status} body=${JSON.stringify(bridgeBody).slice(0, 400)}`
+            );
+            if (!bridgeRes.ok) {
+              // Most likely cause: customer's leg died between
+              // originate and answer. Clean up the orphan new leg
+              // so it doesn't sit alive talking to nobody.
+              console.log(
+                `[transfer/blind/out] customer leg gone — hung up orphan new_leg=${ccid}`
+              );
+              await fetch(
+                `https://api.telnyx.com/v2/calls/${ccid}/actions/hangup`,
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    "Content-Type": "application/json",
+                  },
+                }
+              ).catch(() => {});
+            }
+          }
+        }
+      }
+
       // Capture the OTHER leg's ccid for blind transfer via SIP REFER.
       //
       // Telnyx doesn't include a peer/other-leg ccid in the
@@ -1165,6 +1236,107 @@ export async function POST(req: NextRequest) {
           );
         } else {
           console.warn(`[Webhook] hangup — no row found`);
+        }
+      }
+
+      // Blind-transfer outbound: failure broadcast.
+      //
+      // If a new leg originated by /api/telnyx/transfer hung up
+      // BEFORE its bridge fired (no answer, busy, declined, canceled,
+      // timeout, or even normal_clearing on a never-bridged leg),
+      // notify the rep's UI via Supabase Realtime so it can show
+      // "Transfer destination didn't pick up — call still active."
+      // The brief specifies UI confirmation within ~35s; broadcast
+      // here is near-instant.
+      //
+      // Heuristic for "before bridge fired": hangup_cause is in the
+      // failure set below.
+      //
+      // normal_clearing is included with caveat: on a leg that NEVER
+      // bridged, normal_clearing means destination answered then hung
+      // up before bridge fired. False-positive risk on already-bridged
+      // legs is low — by then the rep's WebRTC has been BYE'd by
+      // Telnyx and the UI is already cleared via the existing
+      // callUpdate hangup handler, so the toast shows up to a UI
+      // that's already moved on. Tracked as a follow-up in
+      // PHASE_1A_REPORT.md to track bridge-attempted state explicitly
+      // and only broadcast when bridge never fired.
+      if (eventType === "call.hangup" && payload?.client_state) {
+        let decoded:
+          | { type?: string; customer_ccid?: string; rep_ccid?: string }
+          | null = null;
+        try {
+          decoded = JSON.parse(
+            Buffer.from(payload.client_state as string, "base64").toString(
+              "utf8"
+            )
+          );
+        } catch {
+          /* not our marker; ignore */
+        }
+        const failureCauses = new Set([
+          "no_answer",
+          "no_user_responding",
+          "user_busy",
+          "call_rejected",
+          "originator_cancel",
+          "recovery_on_timer_expire",
+          "media_timeout",
+          "unspecified",
+          "normal_clearing",
+        ]);
+        if (
+          decoded?.type === "blind_xfer_bridge" &&
+          decoded.rep_ccid &&
+          failureCauses.has(hangupCause)
+        ) {
+          console.log(
+            `[transfer/blind/out] destination didn't answer ccid=${ccid} cause=${hangupCause} — notifying rep`
+          );
+          // Look up rep's user_id from their original call_logs row
+          // so we know which Realtime channel to broadcast on.
+          const adminBcast = getAdmin();
+          const { data: repRow } = await adminBcast
+            .from("call_logs")
+            .select("user_id")
+            .eq("call_control_id", decoded.rep_ccid)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          const repUserId = repRow?.user_id as string | null | undefined;
+          if (repUserId) {
+            try {
+              const ch = adminBcast.channel(`user:${repUserId}`, {
+                config: { broadcast: { ack: false, self: false } },
+              });
+              await ch.subscribe();
+              await ch.send({
+                type: "broadcast",
+                event: "blind_xfer_failed",
+                payload: {
+                  reason: hangupCause,
+                  new_leg_ccid: ccid,
+                  customer_ccid: decoded.customer_ccid,
+                  rep_ccid: decoded.rep_ccid,
+                  message:
+                    "Transfer destination didn't pick up — call still active.",
+                },
+              });
+              await adminBcast.removeChannel(ch);
+              console.log(
+                `[transfer/blind/out] broadcast blind_xfer_failed to user:${repUserId}`
+              );
+            } catch (err) {
+              console.warn(
+                `[transfer/blind/out] broadcast failed:`,
+                (err as Error).message
+              );
+            }
+          } else {
+            console.warn(
+              `[transfer/blind/out] no user_id for rep_ccid=${decoded.rep_ccid} — cannot broadcast`
+            );
+          }
         }
       }
       break;
