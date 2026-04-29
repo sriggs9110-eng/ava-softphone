@@ -126,6 +126,49 @@ export async function POST(req: NextRequest) {
   // confirmed the previous deploy of this path "worked successfully"
   // — that's the path we keep.
 
+  // Pre-flight liveness check on the customer leg.
+  //
+  // Production 2026-04-29 19:39 UTC: an earlier blind-transfer attempt
+  // killed the customer leg ~28 seconds before /complete fired. Step 2
+  // /actions/transfer then returned 422 "Call has already ended" —
+  // technically correct but confusing as a UI message. A pre-flight
+  // GET on the customer leg lets us return a specific 409 instead, so
+  // the rep sees "Original caller's leg is no longer active" rather
+  // than a generic Telnyx error. Same pattern as warm-transfer/initiate
+  // (commit 0640b13).
+  try {
+    const probe = await fetch(
+      `https://api.telnyx.com/v2/calls/${externalCcid}`,
+      { headers: { Authorization: `Bearer ${apiKey}` } }
+    );
+    if (probe.ok) {
+      const pbody = (await probe.json().catch(() => ({}))) as {
+        data?: { is_alive?: boolean };
+      };
+      const alive = pbody?.data?.is_alive;
+      if (alive === false) {
+        console.log(
+          `[warm/complete] customer leg not alive externalCcid=${externalCcid} — refusing transfer`
+        );
+        return NextResponse.json(
+          {
+            error:
+              "Original caller's leg is no longer active. Hang up the consult and call the destination separately if needed.",
+          },
+          { status: 409 }
+        );
+      }
+    }
+    // Non-OK probe response (404, transient 5xx) is treated as
+    // inconclusive — fall through to the existing hangup+transfer
+    // and let Telnyx's response surface the real state.
+  } catch (err) {
+    console.warn(
+      `[warm/complete] pre-flight probe threw — continuing:`,
+      (err as Error).message
+    );
+  }
+
   // Step 1: hangup the consult call. Frees target's phone for redial.
   console.log(
     `[warm/complete] step 1: hangup consult targetRepCcid=${targetRepCcid}`
