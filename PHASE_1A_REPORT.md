@@ -178,6 +178,40 @@ What was WRONG with 638e517's flow that needs to be different:
 
 ## Phase 1A complete, awaiting direction on Phase 1B.
 
+---
+
+## Follow-ups (track here so they don't get lost)
+
+### Track bridge-attempted state for blind-transfer outbound
+
+Added 2026-04-29 alongside the originate-then-bridge refactor.
+
+The `blind_xfer_failed` Realtime broadcast in
+`app/api/telnyx/webhook/route.ts` (call.hangup handler) currently
+broadcasts whenever the new leg's `hangup_cause` is in a wide failure
+set including `normal_clearing`. False-positive risk on already-bridged
+legs is low — by the time the toast lands, the rep's WebRTC has been
+BYE'd and the UI is already cleared via the existing callUpdate hangup
+handler — but it's still imprecise.
+
+Proper fix: track explicitly whether `/actions/bridge` was attempted
+(or completed) for each `client_state.type === "blind_xfer_bridge"`
+new leg. On call.hangup, broadcast IF AND ONLY IF no bridge attempt
+ever fired.
+
+Options for state storage (no new tables required):
+
+- Store `bridge_attempted_at` timestamp in a column on the new leg's
+  `call_logs` row when call.answered fires the bridge.
+- Or use a small `notes` field marker like `xfer:bridge_attempted`.
+
+Either way, drops the `normal_clearing` entry from the failure set
+and replaces the heuristic with an exact predicate.
+
+Not blocking the originate-then-bridge ship — current behavior is
+"correct but slightly noisy on an edge that doesn't materially affect
+UX." Land it after the primary path is verified working in production.
+
 If you approve continuing to Phase 1B I would propose, before writing code, to share an explicit implementation plan covering:
 
 - Switch `client_state` → `custom_headers` for the auto-answer marker; SDK handler reads `call.options?.customHeaders` and matches on `X-Pepper-Auto-Answer`.

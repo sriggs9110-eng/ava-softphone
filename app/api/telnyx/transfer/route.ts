@@ -83,30 +83,40 @@ async function blindTransfer(args: {
 
   // Blind transfer split by call direction:
   //
-  // INBOUND: Telnyx confirmed in their docs that /actions/transfer
-  // bridges the call_control_id's owner with the new destination. For
-  // inbound calls the external_ccid we stamp at fan-out time IS the
-  // customer's PSTN inbound leg (whose "owner" is the customer), so
-  // /actions/transfer on it correctly bridges customer→new_dest and
-  // drops the rep's fan-out leg. Keep this path.
+  // INBOUND (unchanged): /actions/transfer on external_ccid (the
+  // customer's PSTN inbound leg). Telnyx bridges customer→new_dest
+  // and drops the rep's fan-out leg. Works because the customer is
+  // the "owner" of their own PSTN ccid.
   //
-  // OUTBOUND: the rep's SDK initiates a single Call Control leg whose
-  // "owner" is the rep. /actions/transfer on it bridges rep→new_dest
-  // and drops the customer — exactly the wrong direction (customer
-  // dropped, rep stuck on the line with the new party). Telnyx
-  // doesn't expose a target_legs param on /actions/transfer
-  // (target_legs="self" was tested and made things worse). The fix:
-  // mirror the inbound fan-out primitive — POST /v2/calls with
-  // link_to=outbound_ccid + bridge_on_answer=true. When Leg B
-  // (transfer destination) answers, Telnyx auto-bridges Leg B into
-  // the linked call. The rep's WebRTC leg drops as Telnyx tears down
-  // the original outbound bridge.
+  // OUTBOUND: originate-then-bridge.
   //
-  // ⚠ Theory not yet field-tested: this MAY still bridge the wrong
-  // side for outbound. If so, the next iteration is to fully refactor
-  // around an explicit /actions/bridge after originating Leg B. The
-  // diagnostic logging below ([transfer/blind/out] vs
-  // [transfer/blind/in]) makes it obvious which path ran.
+  //   Replaces the prior link_to + bridge_on_answer mechanism, which
+  //   pre-unbridged the customer's PSTN leg in anticipation of the
+  //   auto-bridge. Confirmed in production 2026-04-29 19:39 UTC: a
+  //   link_to originate at 19:39:22 caused Leg A (customer PSTN, ccid
+  //   YVpDcom...) to die at 19:39:31 — 9 seconds after the new leg was
+  //   created, BEFORE the destination ever answered.
+  //
+  //   New flow:
+  //     1. POST /v2/calls (no link_to, no bridge_on_answer) with
+  //        client_state={type:"blind_xfer_bridge", customer_ccid, rep_ccid}.
+  //     2. Return success immediately to the client.
+  //     3. The call.answered webhook handler reads client_state when
+  //        the new leg picks up, and POSTs /actions/bridge to merge
+  //        the new leg with the customer's PSTN leg. Telnyx unbridges
+  //        the rep's WebRTC leg as a side effect.
+  //     4. If the new leg never answers (no_answer / busy / declined /
+  //        canceled), the call.hangup webhook broadcasts
+  //        blind_xfer_failed on user:<repUserId> Realtime so the UI
+  //        can show "Transfer destination didn't pick up — call still
+  //        active." within ~35s.
+  //     5. If the customer's leg dies before the bridge fires, the
+  //        bridge POST returns non-2xx and we /actions/hangup the
+  //        orphan new leg explicitly.
+  //
+  //   Requires the original call to have an external_ccid stamped
+  //   (i.e., dialed via ?new_dial=1's two-leg path). Without it, we
+  //   don't know which customer leg to bridge into.
 
   const admin = createAdminClient();
   const { data: logRow } = await admin
@@ -132,7 +142,6 @@ async function blindTransfer(args: {
     fromNumber = envFrom.startsWith("+") ? envFrom : `+${envFrom}`;
   }
 
-  // OUTBOUND path: link_to + bridge_on_answer.
   if (direction === "outbound") {
     const callControlAppId = process.env.TELNYX_CALL_CONTROL_APP_ID;
     if (!callControlAppId) {
@@ -141,17 +150,38 @@ async function blindTransfer(args: {
         { status: 500 }
       );
     }
+    if (!externalCcid) {
+      console.log(
+        `[transfer/blind/out] no external_ccid for ccid=${callControlId} — outbound blind transfer requires the two-leg dial path`
+      );
+      return NextResponse.json(
+        {
+          error:
+            "Blind transfer not supported on this call. Outbound calls placed via the legacy SDK path don't have a separately addressable customer leg. Place the call with ?new_dial=1 (two-leg) to enable transfer.",
+        },
+        { status: 409 }
+      );
+    }
+    // Telnyx limits client_state to 4KB. Current payload is ~150 bytes
+    // base64. Don't pile fields here without checking the size.
+    const clientStatePayload = {
+      type: "blind_xfer_bridge" as const,
+      customer_ccid: externalCcid,
+      rep_ccid: callControlId,
+    };
+    const clientState = Buffer.from(
+      JSON.stringify(clientStatePayload)
+    ).toString("base64");
+
     const bodySent: Record<string, unknown> = {
       to: normalizedTo,
       from: fromNumber || normalizedTo,
       connection_id: callControlAppId,
-      link_to: callControlId,
-      bridge_on_answer: true,
-      bridge_intent: true,
       timeout_secs: 30,
+      client_state: clientState,
     };
     console.log(
-      `[transfer/blind/out] request originating new leg link_to=${callControlId} to=${normalizedTo} from=${fromNumber ?? "(none)"}`
+      `[transfer/blind/out] originate to=${normalizedTo} from=${fromNumber ?? "(none)"} customer_ccid=${externalCcid} rep_ccid=${callControlId} (bridge fires on call.answered via webhook)`
     );
     const res = await fetch(`${TELNYX_API}/calls`, {
       method: "POST",
@@ -169,12 +199,12 @@ async function blindTransfer(args: {
       const detail =
         data?.errors?.[0]?.detail ||
         data?.errors?.[0]?.title ||
-        "Outbound transfer (link_to) failed";
+        "Outbound transfer originate failed";
       return NextResponse.json({ error: detail }, { status: res.status });
     }
     return NextResponse.json({
       success: true,
-      mode: "outbound_link_to",
+      mode: "outbound_originate_then_bridge",
       new_leg_ccid: data?.data?.call_control_id,
     });
   }
