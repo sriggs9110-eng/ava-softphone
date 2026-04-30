@@ -23,6 +23,11 @@ interface TransferUIProps {
   onComplete: () => void;
   onCancel: () => void;
   onConference: () => void;
+  // Conference state — when non-null, the rep is in a 3-way merged
+  // conference. Phase 2 swaps Complete/Merge for Leave / End-for-All.
+  inConference: boolean;
+  onLeaveConference: () => void;
+  onEndConferenceForAll: () => void;
 }
 
 export default function TransferUI({
@@ -33,6 +38,9 @@ export default function TransferUI({
   onComplete,
   onCancel,
   onConference,
+  inConference,
+  onLeaveConference,
+  onEndConferenceForAll,
 }: TransferUIProps) {
   const [number, setNumber] = useState("+1");
 
@@ -160,12 +168,14 @@ export default function TransferUI({
     );
   }
 
-  // Phase 2: Transfer target connected
+  // Phase 2: Transfer target connected — split UI by whether the rep
+  // has tapped Merge yet. Pre-merge: Complete / Merge / Cancel.
+  // Post-merge (inConference=true): Leave Conference / End for All.
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-bg-app/95 backdrop-blur-md">
       <div className="flex flex-col items-center gap-6 w-full max-w-sm p-6 animate-slide-up">
         <p className="text-[12px] text-text-tertiary uppercase tracking-[0.5px] font-medium">
-          Transfer in progress
+          {inConference ? "3-way conference active" : "Transfer in progress"}
         </p>
 
         <div className="flex w-full gap-3">
@@ -177,44 +187,73 @@ export default function TransferUI({
               {originalCall.number}
             </p>
             <span className="inline-flex items-center gap-1 mt-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-amber" />
-              <span className="text-[10px] text-amber font-medium">Held</span>
+              <div
+                className={`w-1.5 h-1.5 rounded-full ${
+                  inConference ? "bg-green" : "bg-amber"
+                }`}
+              />
+              <span
+                className={`text-[10px] font-medium ${
+                  inConference ? "text-green" : "text-amber"
+                }`}
+              >
+                {inConference ? "In conference" : "Held"}
+              </span>
             </span>
           </div>
           <div className="flex-1 bg-bg-surface border border-border-subtle rounded-xl p-4 text-center">
             <p className="text-[10px] text-text-tertiary uppercase tracking-wider font-medium mb-2">
-              Transfer
+              {inConference ? "Destination" : "Transfer"}
             </p>
             <p className="text-sm font-semibold text-text-primary">
               {transferCall.number}
             </p>
             <span className="inline-flex items-center gap-1 mt-2">
               <div className="w-1.5 h-1.5 rounded-full bg-green" />
-              <span className="text-[10px] text-green font-medium">Active</span>
+              <span className="text-[10px] text-green font-medium">
+                {inConference ? "In conference" : "Active"}
+              </span>
             </span>
           </div>
         </div>
 
-        <div className="flex flex-col gap-2.5 w-full">
-          <button
-            onClick={onComplete}
-            className="w-full py-3 rounded-lg bg-green hover:bg-green/90 text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
-          >
-            Complete Transfer
-          </button>
-          <button
-            onClick={onConference}
-            className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
-          >
-            Conference (Merge All)
-          </button>
-          <button
-            onClick={onCancel}
-            className="w-full py-3 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
-          >
-            Cancel Transfer
-          </button>
-        </div>
+        {!inConference ? (
+          <div className="flex flex-col gap-2.5 w-full">
+            <button
+              onClick={onComplete}
+              className="w-full py-3 rounded-lg bg-green hover:bg-green/90 text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
+            >
+              Complete Transfer
+            </button>
+            <button
+              onClick={onConference}
+              className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
+            >
+              Conference (Merge All)
+            </button>
+            <button
+              onClick={onCancel}
+              className="w-full py-3 rounded-lg bg-bg-elevated hover:bg-bg-hover text-text-secondary text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
+            >
+              Cancel Transfer
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2.5 w-full">
+            <button
+              onClick={onLeaveConference}
+              className="w-full py-3 rounded-lg bg-accent hover:bg-accent-hover text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
+            >
+              Leave Conference
+            </button>
+            <button
+              onClick={onEndConferenceForAll}
+              className="w-full py-3 rounded-lg bg-red hover:bg-red/90 text-white text-sm font-semibold transition-all duration-150 min-h-[44px] hover:-translate-y-px"
+            >
+              End for All
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

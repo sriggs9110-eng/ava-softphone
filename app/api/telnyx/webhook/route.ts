@@ -1342,6 +1342,186 @@ export async function POST(req: NextRequest) {
       break;
     }
 
+    // ---------------------------------------------------------------
+    // Conference resource webhooks (warm-transfer 3-way merge).
+    //
+    // Drives the post-merge lifecycle: when the rep leaves, close
+    // their call_logs row + stop recording + trigger AI analysis,
+    // while leaving customer ↔ destination on the line. When the
+    // whole conference ends, mark call_conferences.status='ended'.
+    //
+    // Correlation: call_conferences.telnyx_conference_id is set at
+    // /api/telnyx/conference/create insert time. Webhooks here do
+    // a SELECT on that id to find which leg the event refers to.
+    //
+    // Event names follow Telnyx Call Control v2 docs.
+    // ---------------------------------------------------------------
+    case "conference.created": {
+      const confId = payload?.conference_id as string | undefined;
+      console.log(`[Webhook] conference.created id=${confId}`);
+      break;
+    }
+
+    case "conference.participant.joined":
+    case "conference.participant_joined": {
+      const confId = payload?.conference_id as string | undefined;
+      const partCcid = payload?.call_control_id as string | undefined;
+      console.log(
+        `[Webhook] conference.participant_joined conf=${confId} ccid=${partCcid}`
+      );
+      break;
+    }
+
+    case "conference.participant.left":
+    case "conference.participant_left": {
+      const confId = payload?.conference_id as string | undefined;
+      const partCcid = payload?.call_control_id as string | undefined;
+      console.log(
+        `[Webhook] conference.participant_left conf=${confId} ccid=${partCcid}`
+      );
+      if (!confId || !partCcid) break;
+
+      const adminConf = getAdmin();
+      const { data: confRow } = await adminConf
+        .from("call_conferences")
+        .select(
+          "id, rep_ccid, customer_ccid, consult_ccid, rep_user_id, rep_left_at"
+        )
+        .eq("telnyx_conference_id", confId)
+        .maybeSingle();
+      if (!confRow) {
+        console.log(
+          `[Webhook] conference.participant_left no conference row for conf=${confId}`
+        );
+        break;
+      }
+
+      // Only act when it's the REP leaving (or the consult ccid,
+      // which is the rep's other WebRTC leg). Customer/destination
+      // leaving while rep stays is a different case handled by the
+      // UI's state-update logic via Realtime — we don't tear anything
+      // down here.
+      const isRepLeg =
+        partCcid === (confRow.rep_ccid as string) ||
+        partCcid === (confRow.consult_ccid as string);
+      if (!isRepLeg) {
+        console.log(
+          `[Webhook] conference.participant_left non-rep leg ccid=${partCcid} — leaving conference state alone`
+        );
+        break;
+      }
+
+      // Mark rep_left_at if not already set. The first of the rep's
+      // two WebRTC legs to leave wins; the second leg's leave is a
+      // no-op for this field but we still want it logged.
+      if (!confRow.rep_left_at) {
+        await adminConf
+          .from("call_conferences")
+          .update({ rep_left_at: new Date().toISOString() })
+          .eq("id", confRow.id);
+        console.log(
+          `[Webhook] conference rep left conf=${confId} ccid=${partCcid} — closing rep's recording + triggering AI analysis`
+        );
+
+        // Stop recording on the rep's call_logs row. The rep's
+        // /actions/record_start fired at call.answered for repCcid;
+        // the conference participation kept it going. Stop it here
+        // so the recording.saved webhook fires and the call_logs row
+        // gets recording_url + recording_id populated.
+        if (apiKey) {
+          try {
+            const stopRes = await fetch(
+              `https://api.telnyx.com/v2/calls/${confRow.rep_ccid}/actions/record_stop`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${apiKey}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            console.log(
+              `[Webhook] record_stop rep_ccid=${confRow.rep_ccid} status=${stopRes.status}`
+            );
+          } catch (err) {
+            console.warn(
+              `[Webhook] record_stop threw on rep_ccid=${confRow.rep_ccid}:`,
+              (err as Error).message
+            );
+          }
+        }
+
+        // Trigger AI analysis on the rep's call_logs row. Find the
+        // row by ccid; pass call_log_id to /api/ai/analyze-call which
+        // already handles the recording_url-not-yet-populated case
+        // (it polls /v2/recordings via refreshRecordingUrl). Fire
+        // and forget; the analyze pipeline persists status updates
+        // back to call_logs.
+        const { data: repLogRow } = await adminConf
+          .from("call_logs")
+          .select(
+            "id, recording_url, phone_number, direction, duration_seconds, status, transcript"
+          )
+          .eq("call_control_id", confRow.rep_ccid as string)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (repLogRow?.id) {
+          const baseUrl =
+            process.env.NEXT_PUBLIC_APP_URL ||
+            "https://ava-softphone.vercel.app";
+          const fireAnalyze = async () => {
+            try {
+              await fetch(`${baseUrl}/api/ai/analyze-call`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  call_log_id: repLogRow.id,
+                  recording_url: repLogRow.recording_url || null,
+                  call_metadata: {
+                    number: repLogRow.phone_number,
+                    direction: repLogRow.direction,
+                    duration: repLogRow.duration_seconds,
+                    status: repLogRow.status,
+                    timestamp: Date.now(),
+                    transcript: repLogRow.transcript,
+                  },
+                }),
+              });
+              console.log(
+                `[Webhook] AI analyze fired for rep call_log id=${repLogRow.id}`
+              );
+            } catch (err) {
+              console.warn(
+                `[Webhook] AI analyze threw for rep call_log id=${repLogRow.id}:`,
+                (err as Error).message
+              );
+            }
+          };
+          // Use Next's after() to run post-response so the webhook
+          // returns 200 quickly even if analyze takes a while.
+          after(fireAnalyze);
+        } else {
+          console.log(
+            `[Webhook] no call_logs row found for rep_ccid=${confRow.rep_ccid} — skipping AI analyze`
+          );
+        }
+      }
+      break;
+    }
+
+    case "conference.ended": {
+      const confId = payload?.conference_id as string | undefined;
+      console.log(`[Webhook] conference.ended id=${confId}`);
+      if (!confId) break;
+      const adminEnd = getAdmin();
+      await adminEnd
+        .from("call_conferences")
+        .update({ status: "ended", ended_at: new Date().toISOString() })
+        .eq("telnyx_conference_id", confId);
+      break;
+    }
+
     case "call.recording.saved": {
       const urls = payload?.recording_urls as Record<string, string> | undefined;
       const url = urls?.mp3 || urls?.wav;

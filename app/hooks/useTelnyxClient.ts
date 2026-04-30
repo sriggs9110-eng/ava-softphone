@@ -1022,24 +1022,175 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
   const completeTransfer = warmTransferComplete;
   const cancelTransfer = warmTransferCancel;
 
-  const mergeConference = useCallback(() => {
+  // Conference merge state. When non-null, the rep is currently in a
+  // 3-way merged conference (customer + destination + rep). The UI's
+  // TransferUI should swap the Complete/Merge buttons for Leave /
+  // End-for-All when this is non-null.
+  const [conferenceState, setConferenceState] = useState<{
+    conferenceId: string;
+    repCcid: string;
+    consultCcid: string;
+  } | null>(null);
+
+  // Conference merge — replaces the prior fire-and-forget POST to
+  // /api/telnyx/conference with an awaited POST to the new
+  // /api/telnyx/conference/create. The new route does liveness
+  // pre-checks, runs cleanup-on-fail, and persists to call_conferences
+  // for webhook correlation. See app/api/telnyx/conference/create.
+  const mergeConference = useCallback(async () => {
     if (!callRef.current || !transferCallRef.current) return;
-    const originalCallId = callRef.current.telnyxIDs.telnyxCallControlId;
-    const transferCallId = transferCallRef.current.telnyxIDs.telnyxCallControlId;
-    fetch("/api/telnyx/conference", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        call_control_ids: [originalCallId, transferCallId],
-      }),
-    }).catch(() => {});
-    callRef.current.unhold().catch(() => {});
-    setActiveCall((prev) =>
-      prev ? { ...prev, isHeld: false, status: "active" } : null
-    );
-    setTransferCall(null);
-    transferCallRef.current = null;
+    const repCcid = callRef.current.telnyxIDs.telnyxCallControlId;
+    const consultCcid = transferCallRef.current.telnyxIDs.telnyxCallControlId;
+    if (!repCcid || !consultCcid) {
+      console.warn(
+        "[conf/create] missing ccid",
+        { repCcid, consultCcid }
+      );
+      return;
+    }
+    transferDebug("mergeConference — POST /api/telnyx/conference/create", {
+      repCcid,
+      consultCcid,
+    });
+
+    // Unhold the original leg before joining; if we join while held,
+    // the customer participates with one-way audio.
+    try {
+      await callRef.current.unhold();
+    } catch (err) {
+      console.warn("[conf/create] unhold threw (continuing):", err);
+    }
+
+    try {
+      const res = await fetch("/api/telnyx/conference/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repCcid, consultCcid }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        conferenceId?: string;
+        error?: string;
+        dead_leg?: string;
+      };
+      transferDebug("mergeConference — response", {
+        status: res.status,
+        data,
+      });
+      if (!res.ok || !data?.success || !data.conferenceId) {
+        const detail = data?.error || "Telnyx rejected the conference create";
+        const deadHint = data?.dead_leg
+          ? ` (${data.dead_leg} leg is no longer active)`
+          : "";
+        console.error("[conf/create] failed:", res.status, detail);
+        setMicError(`Merge failed: ${detail}${deadHint}.`);
+        // Keep rep in warm-transfer state on failure — don't clear
+        // transferCall, don't pretend the merge worked.
+        return;
+      }
+      setConferenceState({
+        conferenceId: data.conferenceId,
+        repCcid,
+        consultCcid,
+      });
+      setActiveCall((prev) =>
+        prev ? { ...prev, isHeld: false, status: "active" } : null
+      );
+      // We keep transferCall set until the rep leaves — TransferUI
+      // shows the conference-active panel when conferenceState is set.
+    } catch (err) {
+      console.error("[conf/create] threw:", err);
+      setMicError(
+        "Merge failed: network error. The call is still in warm-transfer state; try again or cancel."
+      );
+    }
   }, []);
+
+  // Leave the conference — rep drops out, customer + destination stay
+  // connected. Server's /actions/leave keeps their legs alive and bridged
+  // through the conference; the conference.participant_left webhook
+  // handles call_logs closure + recording stop + AI analysis trigger.
+  // Client: hangup both rep WebRTC SDK call objects so the local UI
+  // clears.
+  const leaveConference = useCallback(async () => {
+    const conf = conferenceState;
+    if (!conf) return;
+    transferDebug("leaveConference — POST /api/telnyx/conference/leave", {
+      conferenceId: conf.conferenceId,
+      ccid: conf.repCcid,
+    });
+    try {
+      // Leave both rep WebRTC legs from the conference so neither
+      // continues to mix into the customer↔destination audio.
+      await fetch("/api/telnyx/conference/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conferenceId: conf.conferenceId,
+          ccid: conf.repCcid,
+        }),
+      });
+      await fetch("/api/telnyx/conference/leave", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          conferenceId: conf.conferenceId,
+          ccid: conf.consultCcid,
+        }),
+      });
+    } catch (err) {
+      console.warn("[conf/leave] network error (continuing):", err);
+    }
+    // Hangup both rep WebRTC SDK objects so the local audio stops and
+    // the UI returns to idle. Server-side /actions/leave already broke
+    // these calls' bridge with the conference — closing them here is
+    // a clean local teardown.
+    try {
+      transferCallRef.current?.hangup();
+    } catch {}
+    try {
+      callRef.current?.hangup();
+    } catch {}
+    transferCallRef.current = null;
+    transferTargetNumberRef.current = null;
+    callRef.current = null;
+    setTransferCall(null);
+    setActiveCall(null);
+    setConferenceState(null);
+  }, [conferenceState]);
+
+  // End-for-All — server hangs up all three legs.
+  const endConferenceForAll = useCallback(async () => {
+    const conf = conferenceState;
+    if (!conf) return;
+    transferDebug(
+      "endConferenceForAll — POST /api/telnyx/conference/end-for-all",
+      { conferenceId: conf.conferenceId }
+    );
+    try {
+      await fetch("/api/telnyx/conference/end-for-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conferenceId: conf.conferenceId }),
+      });
+    } catch (err) {
+      console.warn("[conf/end-for-all] network error (continuing):", err);
+    }
+    // Local cleanup: SDK calls will get BYE'd by Telnyx as part of
+    // the hangup, but proactively clean local state too.
+    try {
+      transferCallRef.current?.hangup();
+    } catch {}
+    try {
+      callRef.current?.hangup();
+    } catch {}
+    transferCallRef.current = null;
+    transferTargetNumberRef.current = null;
+    callRef.current = null;
+    setTransferCall(null);
+    setActiveCall(null);
+    setConferenceState(null);
+  }, [conferenceState]);
 
   const voicemailDrop = useCallback(() => {
     if (!callRef.current) return;
@@ -1106,6 +1257,9 @@ export function useTelnyxClient(onCallEnd?: (info: CallEndInfo) => void) {
     warmTransferComplete,
     warmTransferCancel,
     mergeConference,
+    leaveConference,
+    endConferenceForAll,
+    conferenceState,
     voicemailDrop,
     changeAgentStatus,
     setCallHistory,
