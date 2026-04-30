@@ -133,6 +133,9 @@ export default function Home() {
     completeTransfer,
     cancelTransfer,
     mergeConference,
+    leaveConference,
+    endConferenceForAll,
+    conferenceState,
     voicemailDrop,
     changeAgentStatus,
     setCallHistory: setLocalCallHistory,
@@ -428,9 +431,21 @@ export default function Home() {
     setShowTransfer(false);
   }, [cancelTransfer]);
   const handleConference = useCallback(() => {
+    // Don't close TransferUI here — mergeConference flips
+    // conferenceState to truthy on success and TransferUI then shows
+    // its Phase-2-in-conference layout (Leave / End-for-All buttons).
+    // If mergeConference fails the rep stays in the warm-transfer
+    // panel and can retry.
     mergeConference();
-    setShowTransfer(false);
   }, [mergeConference]);
+  const handleLeaveConference = useCallback(() => {
+    leaveConference();
+    setShowTransfer(false);
+  }, [leaveConference]);
+  const handleEndConferenceForAll = useCallback(() => {
+    endConferenceForAll();
+    setShowTransfer(false);
+  }, [endConferenceForAll]);
 
   const handleVmDrop = useCallback(() => setShowVmConfirm(true), []);
   const confirmVmDrop = useCallback(() => {
@@ -566,6 +581,9 @@ export default function Home() {
           onComplete={handleTransferComplete}
           onCancel={handleTransferCancel}
           onConference={handleConference}
+          inConference={Boolean(conferenceState)}
+          onLeaveConference={handleLeaveConference}
+          onEndConferenceForAll={handleEndConferenceForAll}
         />
       )}
 
