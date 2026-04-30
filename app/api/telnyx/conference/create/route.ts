@@ -25,11 +25,17 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // Returns: { success, conferenceId, status } on 200.
 //
 // Errors:
-//   409 if any of the three legs is no longer alive on Telnyx.
-//   500 on conference creation, join failure, or persistence failure.
-//   On any join failure mid-flight, attempts to /actions/leave any
-//   participants that successfully joined so we don't leave Telnyx
-//   in a half-merged state.
+//   500 on conference creation failure, join failure, or persistence
+//   failure. On any join failure, attempts /actions/leave for any
+//   side that succeeded plus the rep (initial participant) so we
+//   don't leave Telnyx in a half-merged state.
+//
+// No pre-flight liveness checks. Production test 2026-04-30 12:03 UTC
+// proved them counterproductive: three sequential GETs added ~900ms
+// of latency while the customer's leg was orphan-bridged from the
+// moment of conference create, and Telnyx reaped it before the join
+// loop reached it. /actions/join itself surfaces dead-leg errors as
+// 422; the existing cleanup path returns the right 4xx.
 //
 // Side effects on success:
 //   INSERT into call_conferences (id, telnyx_conference_id, rep_ccid,
@@ -40,28 +46,6 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // Logged with [conf/create] prefix.
 
 const TELNYX_API = "https://api.telnyx.com/v2";
-
-interface LegProbeResult {
-  ccid: string;
-  alive: boolean | "unknown";
-  error?: string;
-}
-
-async function probeLegAlive(ccid: string, apiKey: string): Promise<LegProbeResult> {
-  try {
-    const res = await fetch(`${TELNYX_API}/calls/${ccid}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
-    if (!res.ok) {
-      return { ccid, alive: "unknown", error: `HTTP ${res.status}` };
-    }
-    const body = (await res.json()) as { data?: { is_alive?: boolean } };
-    const alive = body?.data?.is_alive;
-    return { ccid, alive: alive === true };
-  } catch (err) {
-    return { ccid, alive: "unknown", error: (err as Error).message };
-  }
-}
 
 async function joinLeg(
   conferenceId: string,
@@ -177,51 +161,36 @@ export async function POST(req: NextRequest) {
     `[conf/create] request rep=${user.id} repCcid=${repCcid} customerCcid=${customerCcid} consultCcid=${consultCcid}`
   );
 
-  // Step 1: pre-flight liveness for all three legs.
-  // If any is dead the merge can't work; bail with 409 so the UI can
-  // show a specific message instead of half-merging and erroring later.
-  const probes = await Promise.all([
-    probeLegAlive(repCcid, apiKey),
-    probeLegAlive(customerCcid, apiKey),
-    probeLegAlive(consultCcid, apiKey),
-  ]);
-  const labels = ["rep", "customer", "consult"];
-  for (let i = 0; i < probes.length; i++) {
-    const p = probes[i];
-    if (p.alive === false) {
-      console.log(
-        `[conf/create] pre-flight ${labels[i]} leg ccid=${p.ccid} not alive — refusing merge`
-      );
-      return NextResponse.json(
-        {
-          error: `${labels[i]} leg is no longer active. Cannot merge.`,
-          dead_leg: labels[i],
-        },
-        { status: 409 }
-      );
-    }
-  }
-  // alive==="unknown" (probe HTTP error / network) is tolerated — we
-  // proceed and let Telnyx's join return the real error.
-
-  // Step 2: create the conference. Telnyx requires an initial
-  // call_control_id (the API rejects without one).
+  // Step 1: create the conference. Telnyx requires an initial
+  // call_control_id (the API rejects without one). REP enters first
+  // as the initial participant — see commit ae821cb's reasoning:
+  // rep transitions directly from the rep↔customer bridge into the
+  // conference.
   //
-  // Order matters here. Production test 2026-04-30 11:26 UTC failed
-  // with 422 "Call no longer active" when joining rep AFTER customer
-  // was the initial participant: putting customer into the conference
-  // tore down the rep↔customer bridge, leaving rep's WebRTC bridged
-  // to nothing → Telnyx reaped the rep leg in <250ms → join rep
-  // returned 422.
+  // ── Why no liveness pre-check ──────────────────────────────────
+  // The previous version did three sequential `GET /v2/calls/{ccid}`
+  // probes BEFORE this create. Those added ~900ms of latency.
+  // Production test 2026-04-30 12:03:25 UTC measured the full route
+  // at 4.32s wall-clock and the customer-leg join 422'd at the end
+  // because Telnyx's bridge reaper had already reaped the customer's
+  // leg (orphaned the moment rep entered the conference).
   //
-  // Fix: REP enters first as the initial participant. Rep transitions
-  // directly from the rep↔customer bridge into the conference. The
-  // customer's leg is then bridged to nothing, but Telnyx tolerates
-  // that orphan state for SECONDS before reaping. We then join consult
-  // (~100ms) and customer (~100ms) within that window.
+  // The liveness checks were paying a 900ms cost to surface an error
+  // we ALREADY get from the join itself — `joinLeg` returns
+  // {ok:false, status, detail} on a 422 "call no longer active". The
+  // existing cleanup-on-fail path returns the right 4xx to the
+  // client. So: drop the probes, claw back the latency, let
+  // /actions/join be the source of truth.
   //
-  // New order: create(initial=repCcid) → join consult → join customer.
+  // ── Why parallel joins ─────────────────────────────────────────
+  // Sequential consult-then-customer added another ~1s. With both
+  // joins running concurrently via Promise.allSettled, total
+  // post-create wall-clock drops to roughly the slower of the two
+  // (~700ms). Combined with no liveness, the route's total elapsed
+  // time goes from ~4.3s to ~1.4s — well inside Telnyx's
+  // orphan-bridge tolerance for the customer leg.
   const conferenceName = `merge-${repCcid.slice(-8)}-${Date.now()}`;
+  const createStartedAt = Date.now();
   const createRes = await fetch(`${TELNYX_API}/conferences`, {
     method: "POST",
     headers: {
@@ -232,8 +201,6 @@ export async function POST(req: NextRequest) {
       call_control_id: repCcid,
       name: conferenceName,
       beep_enabled: "never",
-      // Telnyx default end-conference behavior: ends when the last
-      // participant leaves. That's what we want.
     }),
   });
   const createBody = await createRes.json().catch(() => ({}));
@@ -257,42 +224,79 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   }
+  const createElapsed = Date.now() - createStartedAt;
   console.log(
-    `[conf/create] created conferenceId=${conferenceId} initial=repCcid name=${conferenceName}`
+    `[conf/create] created conferenceId=${conferenceId} initial=repCcid elapsed=${createElapsed}ms name=${conferenceName}`
   );
   // repCcid is implicitly joined by the create call.
 
-  // Step 3: join the remaining two participants sequentially.
-  // Order: consult first, then customer LAST. Customer's leg is in
-  // an orphan-bridge state from the moment rep joined the conference;
-  // joining customer last minimizes the window during which Telnyx
-  // could reap it.
-  const joinedSoFar: string[] = [repCcid];
-  for (const [label, ccid] of [
-    ["consult", consultCcid],
-    ["customer", customerCcid],
-  ] as const) {
-    const result = await joinLeg(conferenceId, ccid, apiKey);
-    if (!result.ok) {
-      console.error(
-        `[conf/create] join ${label} ccid=${ccid} FAILED status=${result.status} detail=${result.detail}`
-      );
-      // Cleanup: leave whoever we already joined so they're freed
-      // back to their call control state. repCcid joined via the
-      // create call counts as joined too — leave it explicitly.
-      for (const j of joinedSoFar) {
-        await leaveQuiet(conferenceId, j, apiKey);
-      }
-      return NextResponse.json(
-        {
-          error: `Failed to add ${label} to conference: ${result.detail}`,
-          partial: true,
-        },
-        { status: 500 }
-      );
-    }
-    console.log(`[conf/create] join ${label} ccid=${ccid} ok`);
-    joinedSoFar.push(ccid);
+  // Step 2: join consult and customer IN PARALLEL. Customer's leg
+  // is orphan-bridged from the moment of conference create; the
+  // longer we wait, the higher the chance Telnyx reaps it.
+  const joinStartedAt = Date.now();
+  const [consultResult, customerResult] = await Promise.allSettled([
+    joinLeg(conferenceId, consultCcid, apiKey),
+    joinLeg(conferenceId, customerCcid, apiKey),
+  ]);
+  const joinElapsed = Date.now() - joinStartedAt;
+
+  // Promise.allSettled gives us {status:"fulfilled", value} or
+  // {status:"rejected", reason}. We further unwrap fulfilled results
+  // because joinLeg returns its own ok/error discriminated union.
+  type JoinOutcome =
+    | { ok: true }
+    | { ok: false; status?: number; detail: string };
+  function settledToOutcome(
+    s: PromiseSettledResult<
+      { ok: true } | { ok: false; status: number; detail: string }
+    >
+  ): JoinOutcome {
+    if (s.status === "fulfilled") return s.value;
+    return {
+      ok: false,
+      detail:
+        s.reason instanceof Error ? s.reason.message : String(s.reason),
+    };
+  }
+  const consultOutcome = settledToOutcome(consultResult);
+  const customerOutcome = settledToOutcome(customerResult);
+
+  console.log(
+    `[conf/create] join consult ccid=${consultCcid} ${
+      consultOutcome.ok ? "ok" : `FAILED ${("status" in consultOutcome && consultOutcome.status) || "?"} ${consultOutcome.detail}`
+    } | join customer ccid=${customerCcid} ${
+      customerOutcome.ok ? "ok" : `FAILED ${("status" in customerOutcome && customerOutcome.status) || "?"} ${customerOutcome.detail}`
+    } | parallel_elapsed=${joinElapsed}ms`
+  );
+
+  // If EITHER join failed, we've left some subset of legs in the
+  // conference. Best-effort /actions/leave for whichever side did
+  // succeed, plus repCcid (the create-call participant). Don't
+  // surface "partial: true" to the client unless one of the two
+  // actually succeeded — when both failed, customer is just dead
+  // and the merge never had a chance.
+  if (!consultOutcome.ok || !customerOutcome.ok) {
+    const leaveTargets: string[] = [repCcid];
+    if (consultOutcome.ok) leaveTargets.push(consultCcid);
+    if (customerOutcome.ok) leaveTargets.push(customerCcid);
+    await Promise.allSettled(
+      leaveTargets.map((c) => leaveQuiet(conferenceId, c, apiKey))
+    );
+
+    // Pick the more useful error to report. If customer failed it's
+    // the structural failure mode we just spent two days fixing —
+    // surface that. Otherwise consult.
+    const primaryFail = !customerOutcome.ok ? "customer" : "consult";
+    const primaryDetail = !customerOutcome.ok
+      ? customerOutcome.detail
+      : (consultOutcome as Exclude<JoinOutcome, { ok: true }>).detail;
+    return NextResponse.json(
+      {
+        error: `Failed to add ${primaryFail} to conference: ${primaryDetail}`,
+        partial: consultOutcome.ok || customerOutcome.ok,
+      },
+      { status: 500 }
+    );
   }
 
   // Step 4: persist for webhook correlation.
