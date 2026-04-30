@@ -205,9 +205,22 @@ export async function POST(req: NextRequest) {
   // proceed and let Telnyx's join return the real error.
 
   // Step 2: create the conference. Telnyx requires an initial
-  // call_control_id; we use the customer's leg so the customer is the
-  // first participant and ringback / hold music defaults apply to
-  // them rather than to the rep.
+  // call_control_id (the API rejects without one).
+  //
+  // Order matters here. Production test 2026-04-30 11:26 UTC failed
+  // with 422 "Call no longer active" when joining rep AFTER customer
+  // was the initial participant: putting customer into the conference
+  // tore down the rep↔customer bridge, leaving rep's WebRTC bridged
+  // to nothing → Telnyx reaped the rep leg in <250ms → join rep
+  // returned 422.
+  //
+  // Fix: REP enters first as the initial participant. Rep transitions
+  // directly from the rep↔customer bridge into the conference. The
+  // customer's leg is then bridged to nothing, but Telnyx tolerates
+  // that orphan state for SECONDS before reaping. We then join consult
+  // (~100ms) and customer (~100ms) within that window.
+  //
+  // New order: create(initial=repCcid) → join consult → join customer.
   const conferenceName = `merge-${repCcid.slice(-8)}-${Date.now()}`;
   const createRes = await fetch(`${TELNYX_API}/conferences`, {
     method: "POST",
@@ -216,7 +229,7 @@ export async function POST(req: NextRequest) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      call_control_id: customerCcid,
+      call_control_id: repCcid,
       name: conferenceName,
       beep_enabled: "never",
       // Telnyx default end-conference behavior: ends when the last
@@ -245,17 +258,19 @@ export async function POST(req: NextRequest) {
     );
   }
   console.log(
-    `[conf/create] created conferenceId=${conferenceId} initial=customerCcid name=${conferenceName}`
+    `[conf/create] created conferenceId=${conferenceId} initial=repCcid name=${conferenceName}`
   );
-  // customerCcid is implicitly joined by the create call.
+  // repCcid is implicitly joined by the create call.
 
   // Step 3: join the remaining two participants sequentially.
-  // Order: rep first (so the rep can hear the conference even if
-  // consult join fails), then consult.
-  const joinedSoFar: string[] = [customerCcid];
+  // Order: consult first, then customer LAST. Customer's leg is in
+  // an orphan-bridge state from the moment rep joined the conference;
+  // joining customer last minimizes the window during which Telnyx
+  // could reap it.
+  const joinedSoFar: string[] = [repCcid];
   for (const [label, ccid] of [
-    ["rep", repCcid],
     ["consult", consultCcid],
+    ["customer", customerCcid],
   ] as const) {
     const result = await joinLeg(conferenceId, ccid, apiKey);
     if (!result.ok) {
@@ -263,8 +278,8 @@ export async function POST(req: NextRequest) {
         `[conf/create] join ${label} ccid=${ccid} FAILED status=${result.status} detail=${result.detail}`
       );
       // Cleanup: leave whoever we already joined so they're freed
-      // back to their call control state. customerCcid joined via
-      // the create call counts as joined too — leave it explicitly.
+      // back to their call control state. repCcid joined via the
+      // create call counts as joined too — leave it explicitly.
       for (const j of joinedSoFar) {
         await leaveQuiet(conferenceId, j, apiKey);
       }

@@ -1522,6 +1522,43 @@ export async function POST(req: NextRequest) {
       break;
     }
 
+    // Remaining conference.* events — log only. Telnyx fires these
+    // during normal conference operation and Stephen's first test
+    // showed them landing in the default-Unhandled bucket. We don't
+    // need to ACT on them, but we do want them recognized in logs so
+    // searches for "[Webhook] conference.*" match cleanly and the
+    // default catch only fires for genuinely unknown events.
+    //
+    // Both dot and underscore variants accepted because Telnyx docs
+    // are inconsistent across pages.
+    case "conference.floor.changed":
+    case "conference.floor_changed": {
+      const confId = payload?.conference_id as string | undefined;
+      const partCcid = payload?.call_control_id as string | undefined;
+      console.log(
+        `[Webhook] conference.floor_changed conf=${confId} ccid=${partCcid}`
+      );
+      break;
+    }
+
+    case "conference.recording.saved":
+    case "conference.recording_saved": {
+      const confId = payload?.conference_id as string | undefined;
+      console.log(
+        `[Webhook] conference.recording_saved conf=${confId}`
+      );
+      break;
+    }
+
+    case "conference.speak.started":
+    case "conference.speak_started":
+    case "conference.speak.ended":
+    case "conference.speak_ended": {
+      const confId = payload?.conference_id as string | undefined;
+      console.log(`[Webhook] ${eventType} conf=${confId}`);
+      break;
+    }
+
     case "call.recording.saved": {
       const urls = payload?.recording_urls as Record<string, string> | undefined;
       const url = urls?.mp3 || urls?.wav;
@@ -1695,7 +1732,19 @@ export async function POST(req: NextRequest) {
     }
 
     default:
-      console.log(`[Webhook] Unhandled: ${eventType}`);
+      // Catchall. For conference.* events that we haven't given an
+      // explicit case yet, log with the [Webhook] conference.* prefix
+      // so Vercel-log searches don't see them as "Unhandled".
+      // Everything else still goes to Unhandled so genuinely unknown
+      // events stay visible.
+      if (typeof eventType === "string" && eventType.startsWith("conference.")) {
+        const confId = payload?.conference_id as string | undefined;
+        console.log(
+          `[Webhook] ${eventType} conf=${confId ?? "?"} (no-op)`
+        );
+      } else {
+        console.log(`[Webhook] Unhandled: ${eventType}`);
+      }
   }
 
   return NextResponse.json({ status: "ok" });
